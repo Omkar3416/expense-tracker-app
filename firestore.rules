@@ -1,0 +1,53 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && request.auth.token.admin == true;
+    }
+
+    // ✅ User profiles (each user can read/write only their own)
+    match /users/{uid} {
+      allow read, write: if isSignedIn() && request.auth.uid == uid;
+
+      match /transactions/{id} {
+        allow read, write: if isSignedIn() && request.auth.uid == uid;
+      }
+
+      match /borrowings/{id} {
+        allow read, write: if isSignedIn() && request.auth.uid == uid;
+      }
+    }
+
+    // ✅ Admin can read all users (optional)
+    match /users/{uid} {
+      allow read: if isAdmin();
+    }
+
+    // ✅ Dynamic app auth config: appConfig/auth
+    match /appConfig/{docId} {
+      // logged in users can READ
+      allow read: if isSignedIn();
+
+      // ONLY admin claim can WRITE
+      allow write: if isAdmin();
+    }
+
+    // ✅ Security Logs
+    match /securityLogs/{logId} {
+      // anyone logged in can CREATE log
+      allow create: if isSignedIn();
+
+      // only admin can read logs
+      allow read: if isAdmin();
+
+      // no updates/deletes (tamper protection)
+      allow update, delete: if false;
+    }
+  }
+}
