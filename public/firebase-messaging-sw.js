@@ -68,41 +68,48 @@ function getBody(payload) {
 }
 
 /**
- * ✅ Convert any URL into a SAFE SAME-ORIGIN relative path.
- * WHY: prevents opening expired Vercel preview deployments on Mac.
+ * ✅ Convert ANY URL into a SAFE SAME-ORIGIN path.
  *
- * - If payload url is "https://old-preview.vercel.app/dashboard" -> block and fallback
- * - If payload url is "/dashboard" -> allow
- * - If payload url is "dashboard" -> normalize to "/dashboard"
+ * Accepts:
+ * - "/dashboard"
+ * - "dashboard"
+ * - "https://old-preview.vercel.app/dashboard"
+ * - "http://localhost:3000/dashboard"
+ *
+ * Output is ALWAYS a path like "/dashboard?x=1#y"
+ * and is ALWAYS safe to open on current origin.
  */
 function toSafeSameOriginPath(rawUrl) {
+  const fallback = "/dashboard";
+
   try {
     const raw = typeof rawUrl === "string" ? rawUrl.trim() : "";
-    if (!raw) return "/dashboard";
+    if (!raw) return fallback;
 
-    // Normalize common mistakes like "dashboard"
-    const normalized = raw.startsWith("/") ? raw : "/" + raw;
-
-    // Parse using current origin
-    const u = new URL(normalized, self.location.origin);
-
-    // Block cross-origin absolute URLs
-    if (u.origin !== self.location.origin) {
-      warn("⚠️ Blocked cross-origin notification url:", rawUrl);
-      return "/dashboard";
+    // 1) Absolute URL: keep only path/query/hash
+    if (/^https?:\/\//i.test(raw)) {
+      const abs = new URL(raw);
+      const path =
+        (abs.pathname || fallback) + (abs.search || "") + (abs.hash || "");
+      return path.startsWith("/") ? path : "/" + path;
     }
 
-    // Return relative path only
-    const path = (u.pathname || "/dashboard") + (u.search || "") + (u.hash || "");
-    return path || "/dashboard";
+    // 2) Relative path normalize ("dashboard" -> "/dashboard")
+    const rel = raw.startsWith("/") ? raw : "/" + raw;
+
+    // Validate by parsing relative on current origin
+    const u = new URL(rel, self.location.origin);
+    const path = (u.pathname || fallback) + (u.search || "") + (u.hash || "");
+    return path.startsWith("/") ? path : "/" + path;
   } catch (e) {
     warn("⚠️ toSafeSameOriginPath failed:", e);
-    return "/dashboard";
+    return fallback;
   }
 }
 
 /**
- * ✅ Extract url safely
+ * ✅ Extract url safely (stored in notification data)
+ * ALWAYS store as safe same-origin PATH.
  */
 function getUrl(payload) {
   const data = (payload && payload.data) || {};
@@ -111,7 +118,6 @@ function getUrl(payload) {
       ? data.url.trim()
       : "/dashboard";
 
-  // ✅ SAFETY FIX: always keep url same-origin relative
   return toSafeSameOriginPath(raw);
 }
 
@@ -130,7 +136,7 @@ function hashString(str) {
 /**
  * ✅ Extract notificationId (DEDUP KEY)
  *
- * IMPORTANT FIX:
+ * IMPORTANT:
  * If you don't provide data.notificationId, we still dedupe using:
  * - payload.fcmMessageId / payload.messageId
  * - or hash of payload content
@@ -165,20 +171,19 @@ function getNotificationId(payload) {
       body,
       url,
       data,
-      // sometimes exists:
       from: payload?.from || null,
       collapseKey: payload?.collapseKey || null,
     });
 
     return "hash_" + hashString(stable);
   } catch {
-    // If everything fails, return null (rare)
     return null;
   }
 }
 
 /**
  * ✅ SW DEDUPE using Cache Storage (persistent per device)
+ * Keep last N ids to prevent infinite growth.
  */
 const DEDUPE_CACHE = "fcm_dedupe_v2";
 const DEDUPE_MAX_KEYS = 120;
@@ -211,7 +216,7 @@ async function saveSeenIds(list) {
 }
 
 async function shouldShowNotification(notificationId) {
-  // If we still don't have id, allow (but this is now rare because we hash)
+  // If we still don't have id, allow (rare now because we hash)
   if (!notificationId) return true;
 
   const seen = await getSeenIds();
@@ -237,7 +242,7 @@ async function showNotificationFromPayload(payload, source) {
     const body = getBody(payload);
     const data = (payload && payload.data) || {};
 
-    // ✅ IMPORTANT: url now always safe same-origin relative
+    // ✅ IMPORTANT: url always safe same-origin path
     const url = getUrl(payload);
 
     const notificationId = getNotificationId(payload);
@@ -273,7 +278,6 @@ messaging.onBackgroundMessage(function (payload) {
 
 /**
  * ✅ PUSH event handler (kept)
- * Now safe because dedupe works even without notificationId.
  */
 self.addEventListener("push", function (event) {
   log("📩 PUSH EVENT RECEIVED");
@@ -312,9 +316,10 @@ self.addEventListener("notificationclick", function (event) {
       event.notification.data.url) ||
     "/dashboard";
 
-  // ✅ SAFETY FIX:
-  // rawUrl could be an old absolute vercel URL. Always keep it same-origin.
+  // ✅ Convert whatever rawUrl is into safe same-origin path
   const safePath = toSafeSameOriginPath(rawUrl);
+
+  // ✅ Always open on CURRENT origin (prevents old vercel/localhost)
   const targetUrl = new URL(safePath, self.location.origin).href;
 
   log("🖱️ Notification clicked → rawUrl:", rawUrl);
@@ -328,6 +333,7 @@ self.addEventListener("notificationclick", function (event) {
         includeUncontrolled: true,
       });
 
+      // focus existing same-origin client if present
       for (const client of allClients) {
         try {
           const clientOrigin = new URL(client.url).origin;
@@ -340,7 +346,7 @@ self.addEventListener("notificationclick", function (event) {
             });
             return;
           }
-        } catch (e) {
+        } catch {
           // ignore
         }
       }
@@ -351,10 +357,43 @@ self.addEventListener("notificationclick", function (event) {
   );
 });
 
-self.addEventListener("install", function () {
-  log("✅ SW INSTALLED");
+/**
+ * ✅ SW LIFECYCLE FIX (NO USER CLEAR CACHE NEEDED)
+ * - skipWaiting(): activate new SW immediately after deploy
+ * - clients.claim(): control pages immediately after activate
+ * - message listener: allow page to request "skip waiting" if needed
+ */
+self.addEventListener("message", (event) => {
+  try {
+    const data = event?.data || {};
+    if (data && data.type === "SKIP_WAITING") {
+      log("📨 Received SKIP_WAITING message");
+      self.skipWaiting();
+    }
+  } catch (e) {
+    warn("⚠️ message handler failed:", e);
+  }
 });
 
-self.addEventListener("activate", function () {
+self.addEventListener("install", function () {
+  log("✅ SW INSTALLED");
+  try {
+    self.skipWaiting();
+  } catch (e) {
+    warn("⚠️ skipWaiting failed:", e);
+  }
+});
+
+self.addEventListener("activate", function (event) {
   log("✅ SW ACTIVATED");
+  event.waitUntil(
+    (async () => {
+      try {
+        await clients.claim();
+        log("✅ clients.claim() done");
+      } catch (e) {
+        warn("⚠️ clients.claim failed:", e);
+      }
+    })()
+  );
 });

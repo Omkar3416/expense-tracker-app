@@ -187,8 +187,41 @@ export async function requestNotificationPermission(): Promise<NotificationPermi
 }
 
 /**
+ * ✅ Wait for controller to change once (so new SW takes control)
+ * Safe: no reload, no loops.
+ */
+async function waitForControllerChangeOnce(timeoutMs = 1500): Promise<void> {
+  if (typeof window === "undefined") return;
+  if (!("serviceWorker" in navigator)) return;
+
+  // If already controlled, nothing to wait for.
+  if (navigator.serviceWorker.controller) return;
+
+  await new Promise<void>((resolve) => {
+    let done = false;
+
+    const timer = window.setTimeout(() => {
+      if (done) return;
+      done = true;
+      resolve();
+    }, timeoutMs);
+
+    navigator.serviceWorker.addEventListener(
+      "controllerchange",
+      () => {
+        if (done) return;
+        done = true;
+        window.clearTimeout(timer);
+        resolve();
+      },
+      { once: true }
+    );
+  });
+}
+
+/**
  * ✅ Ensure Service Worker is registered
- * ✅ Important: call reg.update() so latest SW is used after deployments
+ * ✅ AUTO: update + activate latest SW after deploy (no user cache clear)
  */
 export async function ensureMessagingServiceWorker(): Promise<ServiceWorkerRegistration | null> {
   if (typeof window === "undefined") return null;
@@ -198,44 +231,42 @@ export async function ensureMessagingServiceWorker(): Promise<ServiceWorkerRegis
 
   try {
     const regs = await navigator.serviceWorker.getRegistrations();
-
     const found = regs.find((r) => r.active?.scriptURL?.includes(swUrl));
 
-    if (found) {
-      log("Found existing SW registration:", {
-        scope: found.scope,
-        scriptURL: found.active?.scriptURL ?? null,
-      });
+    const reg = found ?? (await navigator.serviceWorker.register(swUrl));
 
-      // ✅ NEW: ensure we pull latest SW after deploy (Mac issues often from stale SW)
-      try {
-        await found.update();
-        log("✅ SW update() called for existing registration");
-      } catch (e) {
-        warn("SW update() failed (non-fatal):", e);
-      }
-
-      return found;
-    }
-
-    log("No existing SW found → registering:", swUrl);
-
-    const reg = await navigator.serviceWorker.register(swUrl);
-
-    log("Registered new SW:", {
+    log(found ? "Found existing SW registration:" : "Registered new SW:", {
       scope: reg.scope,
-      scriptURL: reg.active?.scriptURL ?? reg.installing?.scriptURL ?? null,
+      scriptURL:
+        reg.active?.scriptURL ??
+        reg.waiting?.scriptURL ??
+        reg.installing?.scriptURL ??
+        null,
     });
 
-    await navigator.serviceWorker.ready;
-
-    // ✅ NEW: update after ready too (safe)
+    // ✅ Always try to pull latest SW file
     try {
       await reg.update();
-      log("✅ SW update() called after register");
+      log("✅ SW update() called");
     } catch (e) {
-      warn("SW update() failed after register (non-fatal):", e);
+      warn("SW update() failed (non-fatal):", e);
     }
+
+    // ✅ If new SW is waiting, ask it to skip waiting (pairs with SW message listener)
+    if (reg.waiting) {
+      try {
+        log("✅ SW waiting detected → sending SKIP_WAITING");
+        reg.waiting.postMessage({ type: "SKIP_WAITING" });
+      } catch (e) {
+        warn("postMessage(SKIP_WAITING) failed (non-fatal):", e);
+      }
+    }
+
+    // ✅ Ensure ready (active SW)
+    await navigator.serviceWorker.ready;
+
+    // ✅ Wait briefly for SW to control this page (helps Mac stale SW cases)
+    await waitForControllerChangeOnce();
 
     return reg;
   } catch (e) {
@@ -338,10 +369,6 @@ export async function getFcmTokenWithRecovery(): Promise<string | null> {
 
 /**
  * ✅ OPTIONAL helper (does NOT affect existing behavior unless you call it)
- * Best used for your "Repair" button if you want:
- * - Reset SW
- * - Re-register latest SW
- * - Recreate token
  */
 export async function forceRefreshMessagingAndToken(): Promise<string | null> {
   try {
@@ -351,9 +378,7 @@ export async function forceRefreshMessagingAndToken(): Promise<string | null> {
     const reg = await ensureMessagingServiceWorker();
     if (!reg) return null;
 
-    // ensure ready
     await navigator.serviceWorker.ready;
-
     return await getFcmToken();
   } catch (e) {
     errLog("forceRefreshMessagingAndToken failed:", e);
