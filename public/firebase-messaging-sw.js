@@ -11,13 +11,7 @@ importScripts(
   "https://www.gstatic.com/firebasejs/10.7.1/firebase-messaging-compat.js"
 );
 
-// ✅ IMPORTANT: Set your *stable* production domain here.
-// This fixes Mac opening old/expired Vercel preview deployments.
-//
-// Example:
-// const CANONICAL_ORIGIN = "https://expense-tracker-app-lilac-omega.vercel.app";
-//
-// Best: use a custom domain like https://app.yourdomain.com
+// ✅ Always open notifications on this stable domain (prevents old/expired Vercel URLs)
 const CANONICAL_ORIGIN = "https://expense-tracker-app-lilac-omega.vercel.app";
 
 // ✅ Firebase config (hardcoded because SW cannot access Next env)
@@ -42,6 +36,22 @@ function warn(...args) {
 function errLog(...args) {
   console.error("[FCM-SW]", ...args);
 }
+
+/**
+ * ✅ NEW (AUTO FIX): allow page to activate latest waiting SW
+ * This pairs with reg.waiting.postMessage({ type: "SKIP_WAITING" })
+ */
+self.addEventListener("message", function (event) {
+  try {
+    const data = event && event.data ? event.data : null;
+    if (data && data.type === "SKIP_WAITING") {
+      log("✅ Received SKIP_WAITING → calling skipWaiting()");
+      self.skipWaiting();
+    }
+  } catch (e) {
+    warn("⚠️ message handler failed:", e);
+  }
+});
 
 /**
  * ✅ Extract title/body from either:
@@ -98,7 +108,9 @@ function toSafePath(rawUrl) {
 
     // Relative: normalize "dashboard" -> "/dashboard"
     const rel = raw.startsWith("/") ? raw : "/" + raw;
-    const u = new URL(rel, "https://example.invalid"); // just to normalize safely
+
+    // Normalize safely
+    const u = new URL(rel, "https://example.invalid");
     const path = (u.pathname || fallback) + (u.search || "") + (u.hash || "");
     return path.startsWith("/") ? path : "/" + path;
   } catch (e) {
@@ -229,10 +241,7 @@ async function showNotificationFromPayload(payload, source) {
     const title = getTitle(payload);
     const body = getBody(payload);
     const data = (payload && payload.data) || {};
-
-    // ✅ Store PATH only (never origin)
     const url = getUrl(payload);
-
     const notificationId = getNotificationId(payload);
 
     log("🟦 PARSED:", { title, body, url, notificationId, data });
@@ -245,8 +254,12 @@ async function showNotificationFromPayload(payload, source) {
       icon: "/favicon.ico",
       tag: notificationId || undefined,
       renotify: false,
-      // ✅ Keep only safe path in data
-      data: { ...data, url, notificationId, __source: source },
+      data: {
+        ...data,
+        url,
+        notificationId,
+        __source: source,
+      },
     });
 
     log("✅ Notification shown successfully.");
@@ -291,9 +304,6 @@ self.addEventListener("push", function (event) {
 
 /**
  * ✅ Handle click (open app)
- *
- * ✅ FIX: Always open on CANONICAL_ORIGIN (stable domain),
- * even if notification came from an old SW/origin.
  */
 self.addEventListener("notificationclick", function (event) {
   event.notification.close();
@@ -325,7 +335,6 @@ self.addEventListener("notificationclick", function (event) {
         includeUncontrolled: true,
       });
 
-      // Focus an existing tab if it's already on CANONICAL_ORIGIN
       for (const client of allClients) {
         try {
           const origin = new URL(client.url).origin;
@@ -349,75 +358,23 @@ self.addEventListener("notificationclick", function (event) {
   );
 });
 
-
-/**
-
- * ✅ SW LIFECYCLE FIX (NO USER CLEAR CACHE NEEDED)
-
- * - skipWaiting(): activate new SW immediately after deploy
-
- * - clients.claim(): control pages immediately after activate
-
- * - message listener: allow page to request "skip waiting" if needed
-
- */
-
-self.addEventListener("message", (event) => {
-
-  try {
-
-    const data = event?.data || {};
-
-    if (data && data.type === "SKIP_WAITING") {
-
-      log("📨 Received SKIP_WAITING message");
-
-      self.skipWaiting();
-
-    }
-
-  } catch (e) {
-
-    warn("⚠️ message handler failed:", e);
-
-  }
-
-});
-
 self.addEventListener("install", function () {
   log("✅ SW INSTALLED");
 });
 
-try {
-
-  self.skipWaiting();
-
-} catch (e) {
-
-  warn("⚠️ skipWaiting failed:", e);
-
-}
-
-self.addEventListener("activate", function () {
+/**
+ * ✅ NEW (AUTO FIX): claim clients so new SW controls tabs immediately
+ */
+self.addEventListener("activate", function (event) {
   log("✅ SW ACTIVATED");
-
   event.waitUntil(
-
     (async () => {
-
       try {
-
         await clients.claim();
-
         log("✅ clients.claim() done");
-
       } catch (e) {
-
         warn("⚠️ clients.claim failed:", e);
-
       }
-
     })()
-
   );
 });
