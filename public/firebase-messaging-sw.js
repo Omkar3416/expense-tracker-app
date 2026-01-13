@@ -11,6 +11,15 @@ importScripts(
   "https://www.gstatic.com/firebasejs/10.7.1/firebase-messaging-compat.js"
 );
 
+// ✅ IMPORTANT: Set your *stable* production domain here.
+// This fixes Mac opening old/expired Vercel preview deployments.
+//
+// Example:
+// const CANONICAL_ORIGIN = "https://expense-tracker-app-lilac-omega.vercel.app";
+//
+// Best: use a custom domain like https://app.yourdomain.com
+const CANONICAL_ORIGIN = "https://expense-tracker-app-lilac-omega.vercel.app";
+
 // ✅ Firebase config (hardcoded because SW cannot access Next env)
 firebase.initializeApp({
   apiKey: "AIzaSyBuAn_0pDzL5B-9j9yRGxVZjUmL8J4wWIo",
@@ -23,7 +32,7 @@ firebase.initializeApp({
 
 const messaging = firebase.messaging();
 
-// ✅ Unified logger (shows in SW devtools + Chrome internal logs)
+// ✅ Unified logger
 function log(...args) {
   console.log("[FCM-SW]", ...args);
 }
@@ -68,25 +77,18 @@ function getBody(payload) {
 }
 
 /**
- * ✅ Convert ANY URL into a SAFE SAME-ORIGIN path.
- *
- * Accepts:
- * - "/dashboard"
- * - "dashboard"
- * - "https://old-preview.vercel.app/dashboard"
- * - "http://localhost:3000/dashboard"
- *
+ * ✅ Convert ANY URL into a SAFE PATH.
  * Output is ALWAYS a path like "/dashboard?x=1#y"
- * and is ALWAYS safe to open on current origin.
+ * (never an origin), so we can open it on CANONICAL_ORIGIN safely.
  */
-function toSafeSameOriginPath(rawUrl) {
+function toSafePath(rawUrl) {
   const fallback = "/dashboard";
 
   try {
     const raw = typeof rawUrl === "string" ? rawUrl.trim() : "";
     if (!raw) return fallback;
 
-    // 1) Absolute URL: keep only path/query/hash
+    // Absolute URL? keep only path/query/hash
     if (/^https?:\/\//i.test(raw)) {
       const abs = new URL(raw);
       const path =
@@ -94,22 +96,20 @@ function toSafeSameOriginPath(rawUrl) {
       return path.startsWith("/") ? path : "/" + path;
     }
 
-    // 2) Relative path normalize ("dashboard" -> "/dashboard")
+    // Relative: normalize "dashboard" -> "/dashboard"
     const rel = raw.startsWith("/") ? raw : "/" + raw;
-
-    // Validate by parsing relative on current origin
-    const u = new URL(rel, self.location.origin);
+    const u = new URL(rel, "https://example.invalid"); // just to normalize safely
     const path = (u.pathname || fallback) + (u.search || "") + (u.hash || "");
     return path.startsWith("/") ? path : "/" + path;
   } catch (e) {
-    warn("⚠️ toSafeSameOriginPath failed:", e);
+    warn("⚠️ toSafePath failed:", e);
     return fallback;
   }
 }
 
 /**
  * ✅ Extract url safely (stored in notification data)
- * ALWAYS store as safe same-origin PATH.
+ * ALWAYS store as safe PATH only.
  */
 function getUrl(payload) {
   const data = (payload && payload.data) || {};
@@ -118,7 +118,7 @@ function getUrl(payload) {
       ? data.url.trim()
       : "/dashboard";
 
-  return toSafeSameOriginPath(raw);
+  return toSafePath(raw);
 }
 
 /**
@@ -129,22 +129,15 @@ function hashString(str) {
   for (let i = 0; i < str.length; i++) {
     h = (h * 33) ^ str.charCodeAt(i);
   }
-  // convert to unsigned
   return (h >>> 0).toString(16);
 }
 
 /**
  * ✅ Extract notificationId (DEDUP KEY)
- *
- * IMPORTANT:
- * If you don't provide data.notificationId, we still dedupe using:
- * - payload.fcmMessageId / payload.messageId
- * - or hash of payload content
  */
 function getNotificationId(payload) {
   const data = (payload && payload.data) || {};
 
-  // 1) Your preferred ids
   if (typeof data.notificationId === "string" && data.notificationId.trim()) {
     return data.notificationId.trim();
   }
@@ -152,7 +145,6 @@ function getNotificationId(payload) {
     return "announcement_" + data.announcementId.trim();
   }
 
-  // 2) Firebase/FCM ids (often present)
   if (typeof payload?.fcmMessageId === "string" && payload.fcmMessageId.trim()) {
     return "fcm_" + payload.fcmMessageId.trim();
   }
@@ -160,7 +152,6 @@ function getNotificationId(payload) {
     return "msg_" + payload.messageId.trim();
   }
 
-  // 3) Last resort: hash of important fields (still stable)
   try {
     const title = getTitle(payload);
     const body = getBody(payload);
@@ -183,7 +174,6 @@ function getNotificationId(payload) {
 
 /**
  * ✅ SW DEDUPE using Cache Storage (persistent per device)
- * Keep last N ids to prevent infinite growth.
  */
 const DEDUPE_CACHE = "fcm_dedupe_v2";
 const DEDUPE_MAX_KEYS = 120;
@@ -216,7 +206,6 @@ async function saveSeenIds(list) {
 }
 
 async function shouldShowNotification(notificationId) {
-  // If we still don't have id, allow (rare now because we hash)
   if (!notificationId) return true;
 
   const seen = await getSeenIds();
@@ -231,7 +220,6 @@ async function shouldShowNotification(notificationId) {
 
 /**
  * ✅ Always show notification using unified format
- * ✅ Adds `tag` so browser replaces duplicates automatically
  */
 async function showNotificationFromPayload(payload, source) {
   try {
@@ -242,23 +230,22 @@ async function showNotificationFromPayload(payload, source) {
     const body = getBody(payload);
     const data = (payload && payload.data) || {};
 
-    // ✅ IMPORTANT: url always safe same-origin path
+    // ✅ Store PATH only (never origin)
     const url = getUrl(payload);
 
     const notificationId = getNotificationId(payload);
 
     log("🟦 PARSED:", { title, body, url, notificationId, data });
 
-    // ✅ DEDUPE GUARD
     const ok = await shouldShowNotification(notificationId);
     if (!ok) return;
 
     await self.registration.showNotification(title, {
       body,
       icon: "/favicon.ico",
-      // ✅ Tag prevents duplicates (same tag replaces)
       tag: notificationId || undefined,
       renotify: false,
+      // ✅ Keep only safe path in data
       data: { ...data, url, notificationId, __source: source },
     });
 
@@ -293,8 +280,6 @@ self.addEventListener("push", function (event) {
     event.waitUntil(showNotificationFromPayload(json, "push-event"));
   } catch (e) {
     errLog("❌ push event parse failed:", e);
-
-    // fallback to raw text
     try {
       const text = event.data.text();
       warn("⚠️ push raw text:", text);
@@ -306,6 +291,9 @@ self.addEventListener("push", function (event) {
 
 /**
  * ✅ Handle click (open app)
+ *
+ * ✅ FIX: Always open on CANONICAL_ORIGIN (stable domain),
+ * even if notification came from an old SW/origin.
  */
 self.addEventListener("notificationclick", function (event) {
   event.notification.close();
@@ -316,14 +304,18 @@ self.addEventListener("notificationclick", function (event) {
       event.notification.data.url) ||
     "/dashboard";
 
-  // ✅ Convert whatever rawUrl is into safe same-origin path
-  const safePath = toSafeSameOriginPath(rawUrl);
+  const safePath = toSafePath(rawUrl);
 
-  // ✅ Always open on CURRENT origin (prevents old vercel/localhost)
-  const targetUrl = new URL(safePath, self.location.origin).href;
+  let targetUrl = null;
+  try {
+    targetUrl = new URL(safePath, CANONICAL_ORIGIN).href;
+  } catch {
+    targetUrl = new URL("/dashboard", CANONICAL_ORIGIN).href;
+  }
 
   log("🖱️ Notification clicked → rawUrl:", rawUrl);
   log("🖱️ Notification clicked → safePath:", safePath);
+  log("🖱️ Notification clicked → CANONICAL_ORIGIN:", CANONICAL_ORIGIN);
   log("🖱️ Notification clicked → targetUrl:", targetUrl);
 
   event.waitUntil(
@@ -333,16 +325,16 @@ self.addEventListener("notificationclick", function (event) {
         includeUncontrolled: true,
       });
 
-      // focus existing same-origin client if present
+      // Focus an existing tab if it's already on CANONICAL_ORIGIN
       for (const client of allClients) {
         try {
-          const clientOrigin = new URL(client.url).origin;
-          if (clientOrigin === self.location.origin) {
-            log("✅ Focusing existing client:", client.url);
+          const origin = new URL(client.url).origin;
+          if (origin === new URL(CANONICAL_ORIGIN).origin) {
+            log("✅ Focusing existing canonical client:", client.url);
             await client.focus();
             client.postMessage({
               type: "NOTIFICATION_CLICKED",
-              url: safePath, // ✅ send safe path to app
+              url: safePath,
             });
             return;
           }
@@ -357,43 +349,75 @@ self.addEventListener("notificationclick", function (event) {
   );
 });
 
+
 /**
+
  * ✅ SW LIFECYCLE FIX (NO USER CLEAR CACHE NEEDED)
+
  * - skipWaiting(): activate new SW immediately after deploy
+
  * - clients.claim(): control pages immediately after activate
+
  * - message listener: allow page to request "skip waiting" if needed
+
  */
+
 self.addEventListener("message", (event) => {
+
   try {
+
     const data = event?.data || {};
+
     if (data && data.type === "SKIP_WAITING") {
+
       log("📨 Received SKIP_WAITING message");
+
       self.skipWaiting();
+
     }
+
   } catch (e) {
+
     warn("⚠️ message handler failed:", e);
+
   }
+
 });
 
 self.addEventListener("install", function () {
   log("✅ SW INSTALLED");
-  try {
-    self.skipWaiting();
-  } catch (e) {
-    warn("⚠️ skipWaiting failed:", e);
-  }
 });
 
-self.addEventListener("activate", function (event) {
+try {
+
+  self.skipWaiting();
+
+} catch (e) {
+
+  warn("⚠️ skipWaiting failed:", e);
+
+}
+
+self.addEventListener("activate", function () {
   log("✅ SW ACTIVATED");
+
   event.waitUntil(
+
     (async () => {
+
       try {
+
         await clients.claim();
+
         log("✅ clients.claim() done");
+
       } catch (e) {
+
         warn("⚠️ clients.claim failed:", e);
+
       }
+
     })()
+
   );
 });
