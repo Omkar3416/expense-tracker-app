@@ -1,16 +1,13 @@
 // src/lib/notifications/messaging/topics.ts
 
 import { auth } from "@/lib/firebaseClient";
-import type { TopicMode, TopicResponse } from "./types";
-import { log, errLog } from "./logger";
+import { errLog, log } from "./logger";
+import type { SubscribeResult, TopicMode, TopicResponse } from "./types";
 
-/**
- * ✅ Subscribe token to topic via backend (existing)
- */
 export async function subscribeTokenToTopic(
   token: string,
   mode: TopicMode
-): Promise<{ success: boolean; topic?: string; error?: string }> {
+): Promise<SubscribeResult> {
   try {
     const user = auth.currentUser;
     if (!user) return { success: false, error: "Not logged in." };
@@ -52,14 +49,10 @@ export async function subscribeTokenToTopic(
   }
 }
 
-/**
- * ✅ Subscribe token to a USER topic so reminders can be sent to all devices.
- * topic = user_{uid}
- */
 export async function subscribeTokenToUserTopic(
   token: string,
   uid: string
-): Promise<{ success: boolean; topic?: string; error?: string }> {
+): Promise<SubscribeResult> {
   try {
     const user = auth.currentUser;
     if (!user) return { success: false, error: "Not logged in." };
@@ -107,13 +100,10 @@ export async function subscribeTokenToUserTopic(
   }
 }
 
-/**
- * ✅ Unsubscribe token from topic via backend
- */
 export async function unsubscribeTokenFromTopic(
   token: string,
   mode: TopicMode
-): Promise<{ success: boolean; topic?: string; error?: string }> {
+): Promise<SubscribeResult> {
   try {
     const user = auth.currentUser;
     if (!user) return { success: false, error: "Not logged in." };

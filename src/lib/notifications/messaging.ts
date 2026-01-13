@@ -4,11 +4,11 @@ export type {
   ForegroundMessagePayload,
   TopicMode,
   TopicResponse,
-} from "@/lib/notifications/messaging/types";
+  SubscribeResult,
+} from "./messaging/types";
 
-export { shouldProcessForegroundNotification } from "@/lib/notifications/messaging/foregroundDedupe";
-
-export { debugNotificationEnvironment } from "@/lib/notifications/messaging/debug";
+export { shouldProcessForegroundNotification } from "./messaging/foregroundDedupe";
+export { debugNotificationEnvironment } from "./messaging/debug";
 
 export {
   getMessagingSafe,
@@ -17,15 +17,15 @@ export {
   getFcmTokenWithRecovery,
   forceRefreshMessagingAndToken,
   listenToForegroundMessages,
-} from "@/lib/notifications/messaging/fcm";
+} from "./messaging/fcm";
 
 export {
   ensureMessagingServiceWorker,
   resetMessagingServiceWorker,
-} from "@/lib/notifications/messaging/sw";
+} from "./messaging/sw";
 
 export {
   subscribeTokenToTopic,
   subscribeTokenToUserTopic,
   unsubscribeTokenFromTopic,
-} from "@/lib/notifications/messaging/topics";
+} from "./messaging/topics";

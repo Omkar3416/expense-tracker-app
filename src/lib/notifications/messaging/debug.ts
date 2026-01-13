@@ -3,9 +3,6 @@
 import { isSupported } from "firebase/messaging";
 import { log, warn } from "./logger";
 
-/**
- * ✅ Debug environment
- */
 export async function debugNotificationEnvironment(): Promise<void> {
   if (typeof window === "undefined") return;
 
