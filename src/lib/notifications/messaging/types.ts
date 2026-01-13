@@ -16,3 +16,9 @@ export type TopicResponse = {
   error?: string;
   code?: string;
 };
+
+export type SubscribeResult = {
+  success: boolean;
+  topic?: string;
+  error?: string;
+};

@@ -1,6 +1,6 @@
 // src/lib/notifications/messaging/fcm.ts
 
-import { app, auth } from "@/lib/firebaseClient";
+import { app } from "@/lib/firebaseClient";
 import {
   getMessaging,
   getToken,
@@ -9,17 +9,10 @@ import {
   type Messaging,
 } from "firebase/messaging";
 
+import { errLog, log, warn } from "./logger";
 import type { ForegroundMessagePayload } from "./types";
-import { log, warn, errLog } from "./logger";
 import { ensureMessagingServiceWorker, resetMessagingServiceWorker } from "./sw";
 
-function safeString(v: unknown): string | undefined {
-  return typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
-}
-
-/**
- * ✅ Get VAPID key from env
- */
 function getVapidKey(): string {
   const key = process.env.NEXT_PUBLIC_FIREBASE_VAPID_KEY?.trim() ?? "";
   if (!key) {
@@ -30,9 +23,6 @@ function getVapidKey(): string {
   return key;
 }
 
-/**
- * ✅ Get Messaging instance if supported
- */
 export async function getMessagingSafe(): Promise<Messaging | null> {
   if (typeof window === "undefined") return null;
 
@@ -50,9 +40,7 @@ export async function getMessagingSafe(): Promise<Messaging | null> {
   }
 }
 
-/**
- * ✅ Request permission (ONLY when user clicks enable button)
- */
+/** ✅ Request permission (ONLY when user clicks enable button) */
 export async function requestNotificationPermission(): Promise<NotificationPermission> {
   if (typeof window === "undefined") return "denied";
   if (!("Notification" in window)) return "denied";
@@ -65,9 +53,6 @@ export async function requestNotificationPermission(): Promise<NotificationPermi
   return res;
 }
 
-/**
- * ✅ Get FCM token
- */
 export async function getFcmToken(): Promise<string | null> {
   const messaging = await getMessagingSafe();
   if (!messaging) return null;
@@ -87,7 +72,6 @@ export async function getFcmToken(): Promise<string | null> {
 
     log("✅ TOKEN:", token, "len=", token?.length ?? 0);
 
-    // Debug push subscription
     try {
       const sub = await reg.pushManager.getSubscription();
       log("✅ PUSH SUBSCRIPTION AFTER getToken:", sub);
@@ -106,10 +90,7 @@ export async function getFcmToken(): Promise<string | null> {
   }
 }
 
-/**
- * ✅ Get token with recovery:
- * reset SW and retry once
- */
+/** ✅ Get token with recovery: reset SW and retry once */
 export async function getFcmTokenWithRecovery(): Promise<string | null> {
   const t1 = await getFcmToken();
   if (t1) return t1;
@@ -126,13 +107,7 @@ export async function getFcmTokenWithRecovery(): Promise<string | null> {
   return null;
 }
 
-/**
- * ✅ IMPORTANT: This export is required by NotificationBell.tsx
- * Strong repair:
- * - reset SW
- * - re-register latest SW
- * - create token again
- */
+/** ✅ OPTIONAL helper (does NOT affect existing behavior unless you call it) */
 export async function forceRefreshMessagingAndToken(): Promise<string | null> {
   try {
     await resetMessagingServiceWorker();
@@ -149,9 +124,11 @@ export async function forceRefreshMessagingAndToken(): Promise<string | null> {
   }
 }
 
-/**
- * ✅ Listen to foreground messages
- */
+function safeString(v: unknown): string | undefined {
+  return typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
+}
+
+/** ✅ Listen to foreground messages */
 export async function listenToForegroundMessages(
   onPayload: (payload: ForegroundMessagePayload) => void
 ): Promise<(() => void) | null> {

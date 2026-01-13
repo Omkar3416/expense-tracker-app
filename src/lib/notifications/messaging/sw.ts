@@ -1,16 +1,14 @@
 // src/lib/notifications/messaging/sw.ts
 
-import { log, warn, errLog } from "./logger";
+import { errLog, log, warn } from "./logger";
 
-/**
- * ✅ Wait for controller to change once (so new SW takes control)
- * Safe: no reload, no loops.
- */
+const SW_URL = "/firebase-messaging-sw.js";
+
+/** Wait briefly for controller to change once (so new SW takes control). No reload, no loops. */
 async function waitForControllerChangeOnce(timeoutMs = 1500): Promise<void> {
   if (typeof window === "undefined") return;
   if (!("serviceWorker" in navigator)) return;
 
-  // If already controlled, nothing to wait for.
   if (navigator.serviceWorker.controller) return;
 
   await new Promise<void>((resolve) => {
@@ -43,13 +41,11 @@ export async function ensureMessagingServiceWorker(): Promise<ServiceWorkerRegis
   if (typeof window === "undefined") return null;
   if (!("serviceWorker" in navigator)) return null;
 
-  const swUrl = "/firebase-messaging-sw.js";
-
   try {
     const regs = await navigator.serviceWorker.getRegistrations();
-    const found = regs.find((r) => r.active?.scriptURL?.includes(swUrl));
+    const found = regs.find((r) => r.active?.scriptURL?.includes(SW_URL));
 
-    const reg = found ?? (await navigator.serviceWorker.register(swUrl));
+    const reg = found ?? (await navigator.serviceWorker.register(SW_URL));
 
     log(found ? "Found existing SW registration:" : "Registered new SW:", {
       scope: reg.scope,
@@ -60,7 +56,6 @@ export async function ensureMessagingServiceWorker(): Promise<ServiceWorkerRegis
         null,
     });
 
-    // ✅ Always try to pull latest SW file
     try {
       await reg.update();
       log("✅ SW update() called");
@@ -68,7 +63,7 @@ export async function ensureMessagingServiceWorker(): Promise<ServiceWorkerRegis
       warn("SW update() failed (non-fatal):", e);
     }
 
-    // ✅ If new SW is waiting, ask it to skip waiting (pairs with SW listener)
+    // ✅ If new SW is waiting, ask it to skip waiting (pairs with SW message listener)
     if (reg.waiting) {
       try {
         log("✅ SW waiting detected → sending SKIP_WAITING");
@@ -80,7 +75,7 @@ export async function ensureMessagingServiceWorker(): Promise<ServiceWorkerRegis
 
     await navigator.serviceWorker.ready;
 
-    // ✅ Wait briefly for SW to control this page (helps stale SW cases on Mac)
+    // Helps Mac stale SW cases
     await waitForControllerChangeOnce();
 
     return reg;
@@ -90,9 +85,7 @@ export async function ensureMessagingServiceWorker(): Promise<ServiceWorkerRegis
   }
 }
 
-/**
- * ✅ Reset ONLY firebase messaging SW
- */
+/** ✅ Reset ONLY firebase messaging SW */
 export async function resetMessagingServiceWorker(): Promise<void> {
   if (typeof window === "undefined") return;
   if (!("serviceWorker" in navigator)) return;
