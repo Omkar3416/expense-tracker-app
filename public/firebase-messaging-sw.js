@@ -68,13 +68,51 @@ function getBody(payload) {
 }
 
 /**
+ * ✅ Convert any URL into a SAFE SAME-ORIGIN relative path.
+ * WHY: prevents opening expired Vercel preview deployments on Mac.
+ *
+ * - If payload url is "https://old-preview.vercel.app/dashboard" -> block and fallback
+ * - If payload url is "/dashboard" -> allow
+ * - If payload url is "dashboard" -> normalize to "/dashboard"
+ */
+function toSafeSameOriginPath(rawUrl) {
+  try {
+    const raw = typeof rawUrl === "string" ? rawUrl.trim() : "";
+    if (!raw) return "/dashboard";
+
+    // Normalize common mistakes like "dashboard"
+    const normalized = raw.startsWith("/") ? raw : "/" + raw;
+
+    // Parse using current origin
+    const u = new URL(normalized, self.location.origin);
+
+    // Block cross-origin absolute URLs
+    if (u.origin !== self.location.origin) {
+      warn("⚠️ Blocked cross-origin notification url:", rawUrl);
+      return "/dashboard";
+    }
+
+    // Return relative path only
+    const path = (u.pathname || "/dashboard") + (u.search || "") + (u.hash || "");
+    return path || "/dashboard";
+  } catch (e) {
+    warn("⚠️ toSafeSameOriginPath failed:", e);
+    return "/dashboard";
+  }
+}
+
+/**
  * ✅ Extract url safely
  */
 function getUrl(payload) {
   const data = (payload && payload.data) || {};
-  return typeof data.url === "string" && data.url.trim().length > 0
-    ? data.url.trim()
-    : "/dashboard";
+  const raw =
+    typeof data.url === "string" && data.url.trim().length > 0
+      ? data.url.trim()
+      : "/dashboard";
+
+  // ✅ SAFETY FIX: always keep url same-origin relative
+  return toSafeSameOriginPath(raw);
 }
 
 /**
@@ -198,6 +236,8 @@ async function showNotificationFromPayload(payload, source) {
     const title = getTitle(payload);
     const body = getBody(payload);
     const data = (payload && payload.data) || {};
+
+    // ✅ IMPORTANT: url now always safe same-origin relative
     const url = getUrl(payload);
 
     const notificationId = getNotificationId(payload);
@@ -272,9 +312,13 @@ self.addEventListener("notificationclick", function (event) {
       event.notification.data.url) ||
     "/dashboard";
 
-  const targetUrl = new URL(rawUrl, self.location.origin).href;
+  // ✅ SAFETY FIX:
+  // rawUrl could be an old absolute vercel URL. Always keep it same-origin.
+  const safePath = toSafeSameOriginPath(rawUrl);
+  const targetUrl = new URL(safePath, self.location.origin).href;
 
   log("🖱️ Notification clicked → rawUrl:", rawUrl);
+  log("🖱️ Notification clicked → safePath:", safePath);
   log("🖱️ Notification clicked → targetUrl:", targetUrl);
 
   event.waitUntil(
@@ -292,7 +336,7 @@ self.addEventListener("notificationclick", function (event) {
             await client.focus();
             client.postMessage({
               type: "NOTIFICATION_CLICKED",
-              url: rawUrl,
+              url: safePath, // ✅ send safe path to app
             });
             return;
           }
