@@ -7,6 +7,7 @@ import { onAuthStateChanged } from "firebase/auth";
 import type { User } from "firebase/auth";
 
 import {
+  forceRefreshMessagingAndToken,
   getFcmToken,
   requestNotificationPermission,
 } from "@/lib/notifications/messaging";
@@ -182,7 +183,9 @@ export default function NotificationBell() {
   }
 
   /**
-   * ✅ Repair Notifications
+   * ✅ Repair Notifications (STRONG REPAIR)
+   * - Forces SW refresh + token refresh
+   * - Then sync-topics
    */
   async function repairNotifications() {
     if (enableLockRef.current) return;
@@ -202,13 +205,18 @@ export default function NotificationBell() {
       }
 
       if (Notification.permission !== "granted") {
-        setErr("❌ Notifications are not granted. Click Enable Notifications first.");
+        setErr(
+          "❌ Notifications are not granted. Click Enable Notifications first."
+        );
         return;
       }
 
-      const token = await getFcmToken();
+      // ✅ IMPORTANT: force refresh SW + token (fixes stale SW issues on Mac)
+      const token = await forceRefreshMessagingAndToken();
       if (!token) {
-        setErr("❌ Token generation failed. Try refresh or re-enable notifications.");
+        setErr(
+          "❌ Repair failed to refresh token/SW. Please refresh page and try again."
+        );
         return;
       }
 
@@ -283,7 +291,11 @@ export default function NotificationBell() {
             strokeLinejoin="round"
             d="M14 10a2 2 0 10-4 0v1a6 6 0 00-3 5v1h10v-1a6 6 0 00-3-5v-1z"
           />
-          <path strokeLinecap="round" strokeLinejoin="round" d="M9 19a3 3 0 006 0" />
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            d="M9 19a3 3 0 006 0"
+          />
         </svg>
 
         {unseenCount > 0 && (
@@ -297,8 +309,6 @@ export default function NotificationBell() {
       {open && (
         <div
           className={[
-            // ✅ Desktop: right aligned dropdown
-            // ✅ Mobile/Tablet: centered dropdown with safe padding and max width
             "absolute z-50 mt-3",
             "right-0 sm:right-0",
             "left-1/2 -translate-x-1/2 sm:left-auto sm:translate-x-0",
@@ -403,7 +413,8 @@ export default function NotificationBell() {
           {/* ✅ Tip section + Repair button */}
           <div className="mt-3 text-[11px] text-white/40 flex items-center justify-between gap-2">
             <span className="min-w-0">
-              ✅ Tip: DEV announcements go to admins only. Normal users receive only PROD.
+              ✅ Tip: DEV announcements go to admins only. Normal users receive
+              only PROD.
             </span>
 
             {permissionGranted && (
