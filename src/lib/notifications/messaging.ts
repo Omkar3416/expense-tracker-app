@@ -63,7 +63,7 @@ function loadSeenFgIds(): Set<string> {
 function saveSeenFgIds(ids: Set<string>) {
   if (typeof window === "undefined") return;
   try {
-    // keep last 100 only
+    // keep last 100 only (bounded to avoid unlimited growth)
     const arr = Array.from(ids).slice(-100);
     sessionStorage.setItem(FG_DEDUPE_KEY, JSON.stringify(arr));
   } catch {
@@ -80,7 +80,10 @@ export function shouldProcessForegroundNotification(
   if (!notificationId) return true; // no id → cannot dedupe
   const set = loadSeenFgIds();
   if (set.has(notificationId)) {
-    warn("⚠️ Foreground dedupe: skipping already seen notificationId:", notificationId);
+    warn(
+      "⚠️ Foreground dedupe: skipping already seen notificationId:",
+      notificationId
+    );
     return false;
   }
   set.add(notificationId);
@@ -185,6 +188,7 @@ export async function requestNotificationPermission(): Promise<NotificationPermi
 
 /**
  * ✅ Ensure Service Worker is registered
+ * ✅ Important: call reg.update() so latest SW is used after deployments
  */
 export async function ensureMessagingServiceWorker(): Promise<ServiceWorkerRegistration | null> {
   if (typeof window === "undefined") return null;
@@ -196,11 +200,21 @@ export async function ensureMessagingServiceWorker(): Promise<ServiceWorkerRegis
     const regs = await navigator.serviceWorker.getRegistrations();
 
     const found = regs.find((r) => r.active?.scriptURL?.includes(swUrl));
+
     if (found) {
       log("Found existing SW registration:", {
         scope: found.scope,
         scriptURL: found.active?.scriptURL ?? null,
       });
+
+      // ✅ NEW: ensure we pull latest SW after deploy (Mac issues often from stale SW)
+      try {
+        await found.update();
+        log("✅ SW update() called for existing registration");
+      } catch (e) {
+        warn("SW update() failed (non-fatal):", e);
+      }
+
       return found;
     }
 
@@ -214,6 +228,14 @@ export async function ensureMessagingServiceWorker(): Promise<ServiceWorkerRegis
     });
 
     await navigator.serviceWorker.ready;
+
+    // ✅ NEW: update after ready too (safe)
+    try {
+      await reg.update();
+      log("✅ SW update() called after register");
+    } catch (e) {
+      warn("SW update() failed after register (non-fatal):", e);
+    }
 
     return reg;
   } catch (e) {
@@ -304,13 +326,39 @@ export async function getFcmTokenWithRecovery(): Promise<string | null> {
   warn("Token failed → trying SW reset + retry...");
   await resetMessagingServiceWorker();
 
-  await new Promise((r) => setTimeout(r, 300));
+  // ✅ slightly longer delay helps Safari/Brave/Chrome sync after unregister
+  await new Promise((r) => setTimeout(r, 600));
 
   const t2 = await getFcmToken();
   if (t2) return t2;
 
   errLog("Token still failed after recovery.");
   return null;
+}
+
+/**
+ * ✅ OPTIONAL helper (does NOT affect existing behavior unless you call it)
+ * Best used for your "Repair" button if you want:
+ * - Reset SW
+ * - Re-register latest SW
+ * - Recreate token
+ */
+export async function forceRefreshMessagingAndToken(): Promise<string | null> {
+  try {
+    await resetMessagingServiceWorker();
+    await new Promise((r) => setTimeout(r, 600));
+
+    const reg = await ensureMessagingServiceWorker();
+    if (!reg) return null;
+
+    // ensure ready
+    await navigator.serviceWorker.ready;
+
+    return await getFcmToken();
+  } catch (e) {
+    errLog("forceRefreshMessagingAndToken failed:", e);
+    return null;
+  }
 }
 
 function safeString(v: unknown): string | undefined {
@@ -415,11 +463,6 @@ export async function subscribeTokenToTopic(
  * ✅ NEW: Subscribe token to a USER topic so reminders can be sent to all devices.
  *
  * topic = user_{uid}
- *
- * This will require a backend route:
- *  /api/notifications/subscribe-user-topic
- *
- * (We will create it next after you paste that file request.)
  */
 export async function subscribeTokenToUserTopic(
   token: string,
@@ -459,7 +502,10 @@ export async function subscribeTokenToUserTopic(
     });
 
     if (!res.ok) {
-      return { success: false, error: json?.error ?? "Subscribe user topic failed" };
+      return {
+        success: false,
+        error: json?.error ?? "Subscribe user topic failed",
+      };
     }
 
     return { success: true, topic: json.topic };
