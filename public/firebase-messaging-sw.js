@@ -27,11 +27,9 @@ const messaging = firebase.messaging();
 function log(...args) {
   console.log("[FCM-SW]", ...args);
 }
-
 function warn(...args) {
   console.warn("[FCM-SW]", ...args);
 }
-
 function errLog(...args) {
   console.error("[FCM-SW]", ...args);
 }
@@ -80,30 +78,72 @@ function getUrl(payload) {
 }
 
 /**
- * ✅ Extract notificationId
- * This is REQUIRED for dedupe.
- * - reminders: notificationId
- * - announcements: announcementId fallback
+ * ✅ Small stable hash (no crypto needed)
+ */
+function hashString(str) {
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) {
+    h = (h * 33) ^ str.charCodeAt(i);
+  }
+  // convert to unsigned
+  return (h >>> 0).toString(16);
+}
+
+/**
+ * ✅ Extract notificationId (DEDUP KEY)
+ *
+ * IMPORTANT FIX:
+ * If you don't provide data.notificationId, we still dedupe using:
+ * - payload.fcmMessageId / payload.messageId
+ * - or hash of payload content
  */
 function getNotificationId(payload) {
   const data = (payload && payload.data) || {};
+
+  // 1) Your preferred ids
   if (typeof data.notificationId === "string" && data.notificationId.trim()) {
     return data.notificationId.trim();
   }
   if (typeof data.announcementId === "string" && data.announcementId.trim()) {
     return "announcement_" + data.announcementId.trim();
   }
-  return null;
+
+  // 2) Firebase/FCM ids (often present)
+  if (typeof payload?.fcmMessageId === "string" && payload.fcmMessageId.trim()) {
+    return "fcm_" + payload.fcmMessageId.trim();
+  }
+  if (typeof payload?.messageId === "string" && payload.messageId.trim()) {
+    return "msg_" + payload.messageId.trim();
+  }
+
+  // 3) Last resort: hash of important fields (still stable)
+  try {
+    const title = getTitle(payload);
+    const body = getBody(payload);
+    const url = getUrl(payload);
+
+    const stable = JSON.stringify({
+      title,
+      body,
+      url,
+      data,
+      // sometimes exists:
+      from: payload?.from || null,
+      collapseKey: payload?.collapseKey || null,
+    });
+
+    return "hash_" + hashString(stable);
+  } catch {
+    // If everything fails, return null (rare)
+    return null;
+  }
 }
 
 /**
  * ✅ SW DEDUPE using Cache Storage (persistent per device)
- * Prevents double-show when BOTH:
- * - onBackgroundMessage fires
- * - AND push-event fires
  */
-const DEDUPE_CACHE = "fcm_dedupe_v1";
-const DEDUPE_MAX_KEYS = 80; // keep last N keys
+const DEDUPE_CACHE = "fcm_dedupe_v2";
+const DEDUPE_MAX_KEYS = 120;
 
 async function getSeenIds() {
   try {
@@ -133,10 +173,12 @@ async function saveSeenIds(list) {
 }
 
 async function shouldShowNotification(notificationId) {
-  if (!notificationId) return true; // cannot dedupe without id
+  // If we still don't have id, allow (but this is now rare because we hash)
+  if (!notificationId) return true;
+
   const seen = await getSeenIds();
   if (seen.includes(notificationId)) {
-    warn("⏭️ SW dedupe: skipping already shown notificationId:", notificationId);
+    warn("⏭️ SW dedupe: skipping already shown:", notificationId);
     return false;
   }
   seen.push(notificationId);
@@ -146,6 +188,7 @@ async function shouldShowNotification(notificationId) {
 
 /**
  * ✅ Always show notification using unified format
+ * ✅ Adds `tag` so browser replaces duplicates automatically
  */
 async function showNotificationFromPayload(payload, source) {
   try {
@@ -168,6 +211,9 @@ async function showNotificationFromPayload(payload, source) {
     await self.registration.showNotification(title, {
       body,
       icon: "/favicon.ico",
+      // ✅ Tag prevents duplicates (same tag replaces)
+      tag: notificationId || undefined,
+      renotify: false,
       data: { ...data, url, notificationId, __source: source },
     });
 
@@ -178,8 +224,7 @@ async function showNotificationFromPayload(payload, source) {
 }
 
 /**
- * ✅ Background notification handler (DATA-only messages)
- * This runs only for data messages in background.
+ * ✅ Background handler
  */
 messaging.onBackgroundMessage(function (payload) {
   log("🔥 onBackgroundMessage triggered!");
@@ -187,13 +232,8 @@ messaging.onBackgroundMessage(function (payload) {
 });
 
 /**
- * ✅ PERMANENT FIX:
- * Chrome sometimes delivers notification messages directly
- * and does NOT call onBackgroundMessage.
- *
- * So we listen to raw PUSH events too.
- *
- * ✅ DEDUPE ensures NO double notifications even if both fire.
+ * ✅ PUSH event handler (kept)
+ * Now safe because dedupe works even without notificationId.
  */
 self.addEventListener("push", function (event) {
   log("📩 PUSH EVENT RECEIVED");
@@ -226,13 +266,16 @@ self.addEventListener("push", function (event) {
 self.addEventListener("notificationclick", function (event) {
   event.notification.close();
 
-  const url =
+  const rawUrl =
     (event.notification &&
       event.notification.data &&
       event.notification.data.url) ||
     "/dashboard";
 
-  log("🖱️ Notification clicked → url:", url);
+  const targetUrl = new URL(rawUrl, self.location.origin).href;
+
+  log("🖱️ Notification clicked → rawUrl:", rawUrl);
+  log("🖱️ Notification clicked → targetUrl:", targetUrl);
 
   event.waitUntil(
     (async () => {
@@ -241,29 +284,29 @@ self.addEventListener("notificationclick", function (event) {
         includeUncontrolled: true,
       });
 
-      // ✅ If app already open → focus it
       for (const client of allClients) {
-        if (client.url.includes(self.location.origin)) {
-          log("✅ Focusing existing client:", client.url);
-          client.focus();
-          client.postMessage({
-            type: "NOTIFICATION_CLICKED",
-            url,
-          });
-          return;
+        try {
+          const clientOrigin = new URL(client.url).origin;
+          if (clientOrigin === self.location.origin) {
+            log("✅ Focusing existing client:", client.url);
+            await client.focus();
+            client.postMessage({
+              type: "NOTIFICATION_CLICKED",
+              url: rawUrl,
+            });
+            return;
+          }
+        } catch (e) {
+          // ignore
         }
       }
 
-      // ✅ Otherwise open new tab
-      log("✅ Opening new window:", url);
-      await clients.openWindow(url);
+      log("✅ Opening new window:", targetUrl);
+      await clients.openWindow(targetUrl);
     })()
   );
 });
 
-/**
- * ✅ Extra: log SW install/activate lifecycle for debugging
- */
 self.addEventListener("install", function () {
   log("✅ SW INSTALLED");
 });

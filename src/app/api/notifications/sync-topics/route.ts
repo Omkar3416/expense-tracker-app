@@ -130,8 +130,9 @@ export async function POST(req: Request) {
       }
     }
 
-    // ✅ Save token + topics
+    // ✅ Save token + topics (UID doc key stays UID)
     const userRef = adminDb.collection("users").doc(uid);
+    const tokenRef = userRef.collection("fcmTokens").doc(token);
 
     await userRef.set(
       {
@@ -141,18 +142,40 @@ export async function POST(req: Request) {
       { merge: true }
     );
 
-    await userRef.collection("fcmTokens").doc(token).set(
-      {
-        token,
-        platform: "web",
-        uid,
-        topics,
-        updatedAt: FieldValue.serverTimestamp(),
-        createdAt: FieldValue.serverTimestamp(),
-        lastSyncedAt: FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
+    // ✅ Keep createdAt stable (set only once)
+    await adminDb.runTransaction(async (tx) => {
+      const snap = await tx.get(tokenRef);
+
+      if (!snap.exists) {
+        tx.set(
+          tokenRef,
+          {
+            token,
+            platform: "web",
+            uid,
+            topics,
+            createdAt: FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp(),
+            lastSyncedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+        return;
+      }
+
+      tx.set(
+        tokenRef,
+        {
+          token,
+          platform: "web",
+          uid,
+          topics,
+          updatedAt: FieldValue.serverTimestamp(),
+          lastSyncedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+    });
 
     logServer("✅ Sync success:", { uid, topics });
 
