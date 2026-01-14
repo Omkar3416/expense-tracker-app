@@ -12,6 +12,7 @@ import ReminderRow from "@/components/reminders/ReminderRow";
 
 import { useAuthUser } from "@/store/AuthProvider";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
+import { useSearchParams } from "next/navigation";
 
 import {
   type Reminder,
@@ -24,7 +25,8 @@ import {
   computeNextTriggerDate,
   normalizeReminder,
   toISODateOnly,
-  toMiddayISO,
+  istDateTimeToUtcISO,
+  isoToISTTimeHHmm,
 } from "@/lib/reminders/reminderHelpers";
 
 type Frequency = Reminder["frequency"];
@@ -41,9 +43,14 @@ export default function RemindersPage() {
   const uid = user?.uid;
 
   const dispatch = useAppDispatch();
-  const { list: reminders, loading, error } = useAppSelector((s) => s.reminders);
+  const {
+    list: reminders,
+    loading,
+    error,
+  } = useAppSelector((s) => s.reminders);
+  const searchParams = useSearchParams();
+  const openId = searchParams.get("open");
 
-  // ✅ Load placeholder reminders (will later connect to repo)
   useEffect(() => {
     dispatch(fetchReminders({ uid }));
   }, [uid, dispatch]);
@@ -55,6 +62,7 @@ export default function RemindersPage() {
   const [note, setNote] = useState("");
 
   const [dueDate, setDueDate] = useState(() => todayISO());
+  const [dueTime, setDueTime] = useState<string>("12:00"); // ✅ NEW
   const [frequency, setFrequency] = useState<Frequency>("monthly");
   const [intervalDays, setIntervalDays] = useState<string>("30");
 
@@ -73,6 +81,7 @@ export default function RemindersPage() {
   const [editNote, setEditNote] = useState("");
 
   const [editDueDate, setEditDueDate] = useState(() => todayISO());
+  const [editDueTime, setEditDueTime] = useState<string>("12:00"); // ✅ NEW
   const [editFrequency, setEditFrequency] = useState<Frequency>("monthly");
   const [editIntervalDays, setEditIntervalDays] = useState<string>("30");
 
@@ -96,14 +105,21 @@ export default function RemindersPage() {
     const nowIso = new Date().toISOString();
 
     const dueDateOnly = toISODateOnly(dueDate);
-    const dueISO = toMiddayISO(dueDateOnly);
+
+    // ✅ exact IST time -> ISO UTC
+    const dueISO = istDateTimeToUtcISO(dueDateOnly, dueTime);
 
     const interval =
       frequency === "custom"
-        ? Math.max(1, Number(editOrAddInterval(intervalDays)))
+        ? Math.max(1, editOrAddInterval(intervalDays))
         : undefined;
 
-    const nextTriggerDate = computeNextTriggerDate(dueDateOnly, frequency, interval);
+    const nextTriggerDate = computeNextTriggerDate(
+      dueDateOnly,
+      frequency,
+      interval,
+      dueTime
+    );
 
     const r: Reminder = normalizeReminder({
       id: uuidv4(),
@@ -113,6 +129,9 @@ export default function RemindersPage() {
       note: note.trim() || undefined,
 
       dueDate: dueISO,
+      dueTime,
+      timezone: "Asia/Kolkata",
+
       nextTriggerDate,
       frequency,
       intervalDays: interval,
@@ -140,6 +159,7 @@ export default function RemindersPage() {
     setNote("");
     setCategoryId(presetCategories[0].id);
     setDueDate(todayISO());
+    setDueTime("12:00");
     setFrequency("monthly");
     setIntervalDays("30");
   }
@@ -152,11 +172,26 @@ export default function RemindersPage() {
     setEditNote(r.note ?? "");
 
     setEditDueDate(toISODateInput(r.dueDate));
+    setEditDueTime(r.dueTime ?? isoToISTTimeHHmm(r.dueDate) ?? "12:00");
+
     setEditFrequency(r.frequency);
     setEditIntervalDays(String(r.intervalDays ?? 30));
 
     setEditOpen(true);
   }
+  useEffect(() => {
+    if (!openId || reminders.length === 0) return;
+
+    const target = reminders.find((r) => r.id === openId);
+    if (!target) return;
+
+    // Small delay so list/render is stable
+    const t = setTimeout(() => {
+      openEdit(target);
+    }, 250);
+
+    return () => clearTimeout(t);
+  }, [openId, reminders]);
 
   function closeEdit() {
     setEditOpen(false);
@@ -176,14 +211,19 @@ export default function RemindersPage() {
     const nowIso = new Date().toISOString();
 
     const dueDateOnly = toISODateOnly(editDueDate);
-    const dueISO = toMiddayISO(dueDateOnly);
+    const dueISO = istDateTimeToUtcISO(dueDateOnly, editDueTime);
 
     const interval =
       editFrequency === "custom"
         ? Math.max(1, Number(editOrAddInterval(editIntervalDays)))
         : undefined;
 
-    const nextTriggerDate = computeNextTriggerDate(dueDateOnly, editFrequency, interval);
+    const nextTriggerDate = computeNextTriggerDate(
+      dueDateOnly,
+      editFrequency,
+      interval,
+      editDueTime
+    );
 
     const updated: Reminder = normalizeReminder({
       ...currentEditing,
@@ -193,6 +233,9 @@ export default function RemindersPage() {
       note: editNote.trim() || undefined,
 
       dueDate: dueISO,
+      dueTime: editDueTime,
+      timezone: "Asia/Kolkata",
+
       nextTriggerDate,
       frequency: editFrequency,
       intervalDays: interval,
@@ -291,7 +334,8 @@ export default function RemindersPage() {
   const sorted = useMemo(() => {
     return [...reminders].sort(
       (a, b) =>
-        new Date(a.nextTriggerDate).getTime() - new Date(b.nextTriggerDate).getTime()
+        new Date(a.nextTriggerDate).getTime() -
+        new Date(b.nextTriggerDate).getTime()
     );
   }, [reminders]);
 
@@ -301,7 +345,8 @@ export default function RemindersPage() {
         <div>
           <h1 className="text-4xl font-bold tracking-tight">Reminders</h1>
           <p className="text-white/60 mt-2">
-            Create monthly/yearly bills, loan reminders, and future notifications.
+            Create monthly/yearly bills, loan reminders, and future
+            notifications.
           </p>
         </div>
 
@@ -347,6 +392,17 @@ export default function RemindersPage() {
                 />
               </div>
 
+              {/* ✅ Due time (IST) */}
+              <div className="space-y-1">
+                <p className="text-xs text-white/60">Due Time (IST)</p>
+                <input
+                  type="time"
+                  value={dueTime}
+                  onChange={(e) => setDueTime(e.target.value)}
+                  className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white outline-none focus:border-indigo-400/60 focus:ring-2 focus:ring-indigo-500/20 transition"
+                />
+              </div>
+
               {/* Frequency */}
               <select
                 className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white outline-none focus:border-indigo-400/60 focus:ring-2 focus:ring-indigo-500/20 transition"
@@ -367,7 +423,6 @@ export default function RemindersPage() {
                 </option>
               </select>
 
-              {/* Custom interval */}
               {frequency === "custom" && (
                 <Input
                   placeholder="Interval days (example: 30)"
@@ -409,7 +464,9 @@ export default function RemindersPage() {
               </div>
             </div>
 
-            {loading && <div className="mt-4 text-sm text-white/60">Loading…</div>}
+            {loading && (
+              <div className="mt-4 text-sm text-white/60">Loading…</div>
+            )}
 
             <div className="mt-6 space-y-3">
               {sorted.length === 0 ? (
@@ -444,7 +501,7 @@ export default function RemindersPage() {
                 <div>
                   <h3 className="text-xl font-bold">Edit Reminder</h3>
                   <p className="text-xs text-white/60 mt-1">
-                    Update title, due date, frequency or notes.
+                    Update title, due date, time, frequency or notes.
                   </p>
                 </div>
 
@@ -492,10 +549,23 @@ export default function RemindersPage() {
                   />
                 </div>
 
+                {/* ✅ Due time */}
+                <div className="space-y-1">
+                  <p className="text-xs text-white/60">Due Time (IST)</p>
+                  <input
+                    type="time"
+                    value={editDueTime}
+                    onChange={(e) => setEditDueTime(e.target.value)}
+                    className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white outline-none focus:border-indigo-400/60 focus:ring-2 focus:ring-indigo-500/20 transition"
+                  />
+                </div>
+
                 <select
                   className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white outline-none focus:border-indigo-400/60 focus:ring-2 focus:ring-indigo-500/20 transition"
                   value={editFrequency}
-                  onChange={(e) => setEditFrequency(e.target.value as Frequency)}
+                  onChange={(e) =>
+                    setEditFrequency(e.target.value as Frequency)
+                  }
                 >
                   <option value="monthly" className="bg-[#0B1220]">
                     Monthly
@@ -548,7 +618,10 @@ export default function RemindersPage() {
       {deleteOpen && deleteTarget && (
         <ModalPortal>
           <div className="fixed inset-0 z-[210] flex items-center justify-center p-4">
-            <div className="absolute inset-0 bg-black/70" onClick={cancelDelete} />
+            <div
+              className="absolute inset-0 bg-black/70"
+              onClick={cancelDelete}
+            />
 
             <div className="relative w-full max-w-md rounded-3xl border border-white/10 bg-[#0B1220] p-6 shadow-2xl">
               <h3 className="text-xl font-bold">Delete Reminder?</h3>
@@ -588,14 +661,18 @@ export default function RemindersPage() {
       {shareOpen && (
         <ModalPortal>
           <div className="fixed inset-0 z-[220] flex items-center justify-center p-4">
-            <div className="absolute inset-0 bg-black/70" onClick={closeShare} />
+            <div
+              className="absolute inset-0 bg-black/70"
+              onClick={closeShare}
+            />
 
             <div className="relative w-full max-w-xl rounded-3xl border border-white/10 bg-[#0B1220] p-6 shadow-2xl">
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <h3 className="text-xl font-bold">{shareTitle}</h3>
                   <p className="text-xs text-white/60 mt-1">
-                    Your browser blocked share/copy. Copy it manually or use the Copy button.
+                    Your browser blocked share/copy. Copy it manually or use the
+                    Copy button.
                   </p>
                 </div>
 
@@ -643,7 +720,6 @@ function todayISO() {
   return `${yyyy}-${mm}-${dd}`;
 }
 
-// ISO string -> YYYY-MM-DD
 function toISODateInput(iso: string) {
   const d = new Date(iso);
   const yyyy = d.getFullYear();
@@ -670,6 +746,7 @@ function formatReminderShare(r: Reminder) {
     `• Status: ${r.status.toUpperCase()}`,
     `• Frequency: ${r.frequency.toUpperCase()}`,
     `• Due: ${due}`,
+    r.dueTime ? `• Due Time (IST): ${r.dueTime}` : "",
     `• Next Trigger: ${next}`,
     typeof r.amount === "number" ? `• Amount: ₹${r.amount}` : "",
     r.note ? `• Note: ${r.note}` : "",

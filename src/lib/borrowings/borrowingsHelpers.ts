@@ -8,6 +8,8 @@ import type {
 
 /* ---------- date helpers ---------- */
 
+const IST_OFFSET_MINUTES = 330;
+
 export function todayISO() {
   const d = new Date();
   const yyyy = d.getFullYear();
@@ -25,6 +27,35 @@ export function daysUntil(dueISO: string) {
   const due = parseDateOnly(dueISO);
   const today = parseDateOnly(todayISO());
   return Math.round((due - today) / (1000 * 60 * 60 * 24));
+}
+
+/**
+ * ✅ Borrowings exact time (IST) -> dueAt (ISO UTC)
+ * - dueDate must be YYYY-MM-DD
+ * - dueTime must be HH:mm
+ * - if dueTime missing/invalid, defaults 12:00
+ */
+export function borrowingDueAtISO(dueDate: string, dueTime?: string) {
+  const safeDate =
+    typeof dueDate === "string" && dueDate.trim().length > 0 ? dueDate : todayISO();
+  const safeTime = isValidHHmm(dueTime ?? "") ? (dueTime as string) : "12:00";
+
+  const [y, m, d] = safeDate.split("-").map((x) => Number(x));
+  const [hh, mm] = safeTime.split(":").map((x) => Number(x));
+
+  const asUtcMs = Date.UTC(y, (m || 1) - 1, d || 1, hh || 0, mm || 0, 0, 0);
+  const utcMs = asUtcMs - IST_OFFSET_MINUTES * 60_000;
+
+  return new Date(utcMs).toISOString();
+}
+
+function isValidHHmm(v: string) {
+  const m = v.match(/^(\d{2}):(\d{2})$/);
+  if (!m) return false;
+  const hh = Number(m[1]);
+  const mm = Number(m[2]);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return false;
+  return hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59;
 }
 
 /* ---------- badge helpers ---------- */
@@ -60,7 +91,6 @@ export function calcRemaining(b: Borrowing) {
 }
 
 export function formatPaymentDate(isoOrDateOnly: string) {
-  // supports full ISO or yyyy-mm-dd
   const d = new Date(isoOrDateOnly);
   if (Number.isNaN(d.getTime())) return isoOrDateOnly;
   return d.toLocaleDateString();
@@ -105,13 +135,11 @@ export function getFullyPaidDate(b: Borrowing): string | null {
 /* ---------- borrowings state helpers ---------- */
 
 export function toggleBorrowingPaid(b: Borrowing): Borrowing {
-  // Pending -> Paid (auto full payment)
   if (b.status === "pending") {
     const existingPayments = Array.isArray(b.payments) ? b.payments : [];
     const remaining = Math.max(0, b.amount - b.amountPaid);
 
     const autoPay = remaining > 0 ? buildPayment(remaining, todayISO()) : null;
-
     const payments = autoPay ? [...existingPayments, autoPay] : existingPayments;
 
     return {
@@ -119,11 +147,12 @@ export function toggleBorrowingPaid(b: Borrowing): Borrowing {
       status: "paid",
       amountPaid: b.amount,
       payments,
-      paidAt: getFullyPaidDate({ ...b, amountPaid: b.amount, payments }) ?? new Date().toISOString(),
+      paidAt:
+        getFullyPaidDate({ ...b, amountPaid: b.amount, payments }) ??
+        new Date().toISOString(),
     };
   }
 
-  // Paid -> Pending (reset)
   return {
     ...b,
     status: "pending",
@@ -158,7 +187,6 @@ export function addBorrowingPayment(
 
 /* ---------- UI helpers (moved from page) ---------- */
 
-/** ✅ Human readable "x mins ago" */
 export function timeAgo(iso: string) {
   const ts = new Date(iso).getTime();
   if (!Number.isFinite(ts)) return "just now";
@@ -231,6 +259,7 @@ export function formatBorrowingShare(b: Borrowing) {
     `• Paid: ₹${formatMoney(b.amountPaid)}`,
     `• Remaining: ₹${formatMoney(remaining)}`,
     `• Due Date: ${b.dueDate}`,
+    b.dueTime ? `• Due Time (IST): ${b.dueTime}` : "",
     b.note ? `• Note: ${b.note}` : "",
     `• Status: ${b.status.toUpperCase()}`,
     `• Created: ${created}`,

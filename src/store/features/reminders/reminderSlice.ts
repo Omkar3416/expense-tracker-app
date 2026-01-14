@@ -20,25 +20,30 @@ export type Reminder = {
   amount?: number;
   note?: string;
 
-  // ✅ main selected due date
+  // ✅ due date-time stored as ISO (UTC)
   dueDate: string;
 
-  // ✅ next notification date (used later with FCM)
+  /**
+   * ✅ New (optional): exact time selection (HH:mm) and timezone label.
+   * - Keeps backward compatibility (old reminders have no dueTime).
+   * - If missing dueTime, we assume "12:00" IST.
+   */
+  dueTime?: string; // "HH:mm" e.g. "08:30"
+  timezone?: "Asia/Kolkata";
+
+  // ✅ next notification date-time (ISO UTC)
   nextTriggerDate: string;
 
   frequency: ReminderFrequency;
   intervalDays?: number; // for custom
   repeatEvery?: number; // optional
 
-  // ✅ start/stop/pause/resume
   status: ReminderStatus;
   pausedAt?: string | null;
   completedAt?: string | null;
 
-  // ✅ when user marks reminder as paid, we can create tx and link it
   linkedTransactionId?: string | null;
 
-  // ✅ audit
   createdAt: string;
   updatedAt: string | null;
 
@@ -61,13 +66,11 @@ const initialState: ReminderState = {
   error: undefined,
 };
 
-// ✅ Load from repo
 export const fetchReminders = createAsyncThunk<Reminder[], { uid?: string }>(
   "reminders/fetchReminders",
   async ({ uid }) => await repoFetchReminders(uid)
 );
 
-// ✅ Upsert (add/edit)
 export const upsertReminderToRepo = createAsyncThunk<
   Reminder,
   { uid?: string; reminder: Reminder }
@@ -75,7 +78,6 @@ export const upsertReminderToRepo = createAsyncThunk<
   return await repoUpsertReminder(uid, reminder);
 });
 
-// ✅ Delete
 export const deleteReminderFromRepo = createAsyncThunk<
   string,
   { uid?: string; id: string }
@@ -100,7 +102,6 @@ const reminderSlice = createSlice({
 
   extraReducers: (builder) => {
     builder
-      // fetch
       .addCase(fetchReminders.pending, (state) => {
         state.loading = true;
         state.error = undefined;
@@ -114,7 +115,6 @@ const reminderSlice = createSlice({
         state.error = action.error.message ?? "Failed to load reminders";
       })
 
-      // upsert
       .addCase(upsertReminderToRepo.fulfilled, (state, action) => {
         const idx = state.list.findIndex((r) => r.id === action.payload.id);
         if (idx >= 0) state.list[idx] = action.payload;
@@ -124,7 +124,6 @@ const reminderSlice = createSlice({
         state.error = action.error.message ?? "Failed to save reminder";
       })
 
-      // delete
       .addCase(deleteReminderFromRepo.fulfilled, (state, action) => {
         state.list = state.list.filter((r) => r.id !== action.payload);
       })

@@ -35,6 +35,7 @@ import {
   toggleBorrowingPaid,
   addBorrowingPayment,
   formatMoney,
+  borrowingDueAtISO,
 } from "@/lib/borrowings/borrowingsHelpers";
 
 import {
@@ -93,12 +94,10 @@ export default function BorrowingsPage() {
     setTrash(loadTrash(uid));
   }
 
-  // load
   useEffect(() => {
     dispatch(fetchBorrowings({ uid }));
   }, [uid, dispatch]);
 
-  // load trash on uid change
   useEffect(() => {
     refreshTrash();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -111,6 +110,7 @@ export default function BorrowingsPage() {
   const [type, setType] = useState<BorrowingType>("borrowed");
   const [category, setCategory] = useState<BorrowingCategory>("friend");
   const [dueDate, setDueDate] = useState(() => todayISO());
+  const [dueTime, setDueTime] = useState<string>("12:00"); // ✅ NEW
   const [note, setNote] = useState("");
 
   function handleAdd() {
@@ -130,7 +130,15 @@ export default function BorrowingsPage() {
       payments: [],
       type,
       category,
+
+      // ✅ keep old behavior
       dueDate,
+
+      // ✅ new exact time fields (for server FCM later)
+      dueTime,
+      dueAt: borrowingDueAtISO(dueDate, dueTime),
+      timezone: "Asia/Kolkata",
+
       note: note.trim() || undefined,
       status: "pending",
       createdAt: nowIso,
@@ -149,6 +157,7 @@ export default function BorrowingsPage() {
     setType("borrowed");
     setCategory("friend");
     setDueDate(todayISO());
+    setDueTime("12:00");
     setNote("");
   }
 
@@ -179,7 +188,7 @@ export default function BorrowingsPage() {
     });
   }, [list, query, filter]);
 
-  /* ---------------- Stats + Reminders ---------------- */
+  /* ---------------- Stats ---------------- */
 
   const pendingCount = useMemo(
     () => list.filter((b) => b.status === "pending").length,
@@ -211,13 +220,34 @@ export default function BorrowingsPage() {
     [list]
   );
 
+  /**
+   * ✅ Dynamic borrowings reminders (NOT static):
+   * Derived from Firestore borrowings list.
+   * Shows items that are due today / overdue / due soon.
+   */
   const borrowReminders = useMemo(() => {
+    const now = Date.now();
+
+    // You can tune this window without hardcoding reminder "items".
+    const dueSoonDays = 7;
+
     return list
-      .filter((b) => b.status === "pending" && b.amount > b.amountPaid)
-      .map((b) => ({ ...b, d: daysUntil(b.dueDate) }))
-      .filter((b) => b.d <= 7)
-      .sort((a, b) => a.d - b.d)
-      .slice(0, 5);
+      .filter((b) => b.status === "pending")
+      .map((b) => {
+        // Prefer dueAt if present (exact time), else fallback to dueDate.
+        const dueMillis = b.dueAt
+          ? new Date(b.dueAt).getTime()
+          : new Date(b.dueDate).getTime();
+
+        return { b, dueMillis };
+      })
+      .filter(({ dueMillis }) => Number.isFinite(dueMillis))
+      .filter(({ dueMillis }) => {
+        const diffDays = Math.floor((dueMillis - now) / (24 * 60 * 60 * 1000));
+        return diffDays <= dueSoonDays; // overdue/today/soon
+      })
+      .sort((a, z) => a.dueMillis - z.dueMillis)
+      .map(({ b }) => b);
   }, [list]);
 
   /* ---------------- Payment Modal ---------------- */
@@ -287,6 +317,7 @@ export default function BorrowingsPage() {
   const [editType, setEditType] = useState<BorrowingType>("borrowed");
   const [editCategory, setEditCategory] = useState<BorrowingCategory>("friend");
   const [editDueDate, setEditDueDate] = useState(todayISO());
+  const [editDueTime, setEditDueTime] = useState<string>("12:00"); // ✅ NEW
   const [editNote, setEditNote] = useState("");
 
   function openEdit(b: Borrowing) {
@@ -296,6 +327,7 @@ export default function BorrowingsPage() {
     setEditType(b.type);
     setEditCategory(b.category);
     setEditDueDate(b.dueDate || todayISO());
+    setEditDueTime(b.dueTime ?? "12:00");
     setEditNote(b.note ?? "");
     setEditOpen(true);
   }
@@ -322,7 +354,15 @@ export default function BorrowingsPage() {
           amount: amt,
           type: editType,
           category: editCategory,
+
+          // ✅ keep existing behavior
           dueDate: editDueDate,
+
+          // ✅ new exact time fields
+          dueTime: editDueTime,
+          dueAt: borrowingDueAtISO(editDueDate, editDueTime),
+          timezone: "Asia/Kolkata",
+
           note: editNote.trim() || undefined,
           updatedAt: new Date().toISOString(),
           updatedByUid: user?.uid,
@@ -354,15 +394,12 @@ export default function BorrowingsPage() {
 
     const deletedAt = new Date().toISOString();
 
-    // ✅ store in trash (LOCAL)
     addTrashItem(uid, { kind: "borrowing", deletedAt, item: deleteTarget });
     refreshTrash();
 
-    // ✅ show undo bar
     setUndoBorrowing(deleteTarget);
     setUndoOpen(true);
 
-    // ✅ delete from repo (existing behavior)
     dispatch(deleteBorrowingFromRepo({ uid, id: deleteTarget.id }));
 
     cancelDelete();
@@ -376,10 +413,8 @@ export default function BorrowingsPage() {
   function handleUndoDelete() {
     if (!undoBorrowing) return;
 
-    // ✅ restore to repo
     dispatch(upsertBorrowingToRepo({ uid, borrowing: undoBorrowing }));
 
-    // ✅ remove restored item from trash (optional)
     const all = loadTrash(uid);
     const match = all.find(
       (x) => x.kind === "borrowing" && x.item.id === undoBorrowing.id
@@ -446,13 +481,12 @@ export default function BorrowingsPage() {
   const exportCSV = () => exportBorrowingsCSV(list);
   const exportPDF = () => exportBorrowingsPDF(list);
 
-  /* ---------------- Optional Notifications ---------------- */
+  /* ---------------- Optional Notifications (DISABLED) ---------------- */
 
   const lastNotifyRef = useRef<number>(0);
 
   useEffect(() => {
     // ✅ Requirement: do not use static reminders / notifications
-    // Keeping structure without breaking anything, but disabling execution.
     if (false) {
       async function setupNotifications() {
         if (!("Notification" in window)) return;
@@ -550,7 +584,7 @@ export default function BorrowingsPage() {
           >
             Back to Dashboard
           </Link>
-          {/* ✅ Deleted History */}
+
           <button
             onClick={() => {
               refreshTrash();
@@ -576,8 +610,12 @@ export default function BorrowingsPage() {
         soon={dueSoonCount}
       />
 
-      {/* Upcoming Reminders */}
-      <BorrowingsReminders reminders={borrowReminders} />
+      {/* ✅ No static borrowings reminders */}
+      {borrowReminders.length > 0 ? (
+        <BorrowingsReminders
+          reminders={borrowReminders.map((b) => ({ ...b, d: 0 }))}
+        />
+      ) : null}
 
       {/* Main Layout */}
       <div className="mt-10 grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -592,6 +630,8 @@ export default function BorrowingsPage() {
           setCategory={setCategory}
           dueDate={dueDate}
           setDueDate={setDueDate}
+          dueTime={dueTime}
+          setDueTime={setDueTime}
           note={note}
           setNote={setNote}
           categories={BORROWING_CATEGORIES}
@@ -670,6 +710,8 @@ export default function BorrowingsPage() {
         setEditCategory={setEditCategory}
         editDueDate={editDueDate}
         setEditDueDate={setEditDueDate}
+        editDueTime={editDueTime}
+        setEditDueTime={setEditDueTime}
         editNote={editNote}
         setEditNote={setEditNote}
         categories={BORROWING_CATEGORIES}
