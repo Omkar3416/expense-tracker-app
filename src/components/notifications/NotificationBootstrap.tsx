@@ -55,6 +55,50 @@ async function getAdminFlag(): Promise<boolean> {
   }
 }
 
+/**
+ * ✅ Prefer ServiceWorkerRegistration.showNotification in foreground
+ * so that clicks go through your SW `notificationclick` handler and route correctly.
+ */
+async function showForegroundNotificationViaServiceWorker(opts: {
+  title: string;
+  body: string;
+  url?: string;
+  notificationId?: string;
+}): Promise<boolean> {
+  if (typeof window === "undefined") return false;
+  if (!("serviceWorker" in navigator)) return false;
+
+  try {
+    // Ensure SW registered (your helper also auto-updates)
+    const reg = await ensureMessagingServiceWorker();
+    if (!reg) return false;
+
+    // Wait for SW readiness
+    await navigator.serviceWorker.ready;
+
+    // Show notification via SW so that SW handles click routing
+    await reg.showNotification(opts.title, {
+      body: opts.body,
+      icon: "/favicon.ico",
+      tag: opts.notificationId || undefined,
+      data: {
+        url: opts.url ?? "/dashboard",
+        notificationId: opts.notificationId,
+        __source: "foreground",
+      },
+    });
+
+    log("✅ Foreground notification shown via Service Worker");
+    return true;
+  } catch (e) {
+    warn(
+      "showForegroundNotificationViaServiceWorker failed (fallback to Notification()):",
+      e
+    );
+    return false;
+  }
+}
+
 export default function NotificationBootstrap() {
   useEffect(() => {
     let unsubscribe: (() => void) | null = null;
@@ -129,12 +173,16 @@ export default function NotificationBootstrap() {
 
       if (!isLocalhost && !isHttps) {
         warn("❌ Not secure origin. SW registration blocked.");
-        log("HOST:", window.location.hostname, "PROTO:", window.location.protocol);
+        log(
+          "HOST:",
+          window.location.hostname,
+          "PROTO:",
+          window.location.protocol
+        );
         return null;
       }
 
       try {
-        // ✅ Let shared helper handle it too (single source of truth)
         const reg = await ensureMessagingServiceWorker();
         if (!reg) {
           warn("❌ ensureMessagingServiceWorker returned null");
@@ -162,11 +210,12 @@ export default function NotificationBootstrap() {
      * - Logs payload
      * - Shows Notification popup ONLY if permission granted
      * - ✅ Dedupe by notificationId to prevent double showing
+     * - ✅ Prefer SW showNotification so click routing works in foreground too
      */
     async function initForegroundListener() {
       logHeader("Foreground Listener Debug");
 
-      unsubscribe = await listenToForegroundMessages((payload) => {
+      unsubscribe = await listenToForegroundMessages(async (payload) => {
         log("✅ Foreground Notification Received!");
         log("🔥 PAYLOAD (parsed):", payload);
 
@@ -174,22 +223,50 @@ export default function NotificationBootstrap() {
 
         // ✅ Foreground dedupe
         if (!shouldProcessForegroundNotification(notificationId)) {
-          warn("⏭️ Foreground: skipped duplicate notificationId:", notificationId);
+          warn(
+            "⏭️ Foreground: skipped duplicate notificationId:",
+            notificationId
+          );
           return;
         }
 
-        // ✅ Show native notification when tab open (optional)
-        if ("Notification" in window && Notification.permission === "granted") {
-          try {
-            const title = payload.title ?? "Notification";
-            const body = payload.body ?? "";
-            new Notification(title, { body, icon: "/favicon.ico" });
-            log("✅ Foreground popup shown by browser Notification()");
-          } catch (e) {
-            errLog("❌ Foreground Notification() failed:", e);
-          }
-        } else {
+        // ✅ Only show popup if permission granted (existing behavior)
+        if (!("Notification" in window) || Notification.permission !== "granted") {
           warn("⚠️ Cannot show foreground popup (permission not granted).");
+          return;
+        }
+
+        const title = payload.title ?? "Notification";
+        const body = payload.body ?? "";
+        const url = payload.url ?? "/dashboard";
+
+        // ✅ Prefer SW notification so click routes through SW handler
+        const swShown = await showForegroundNotificationViaServiceWorker({
+          title,
+          body,
+          url,
+          notificationId,
+        });
+
+        if (swShown) return;
+
+        // ✅ Fallback: keep your existing behavior (no breaking change)
+        try {
+          const n = new Notification(title, { body, icon: "/favicon.ico" });
+
+          // Optional: route directly for fallback notification clicks
+          n.onclick = () => {
+            try {
+              window.focus();
+              window.location.assign(url);
+            } catch {
+              // ignore
+            }
+          };
+
+          log("✅ Foreground popup shown by browser Notification() fallback");
+        } catch (e) {
+          errLog("❌ Foreground Notification() failed:", e);
         }
       });
 
@@ -244,13 +321,6 @@ export default function NotificationBootstrap() {
       }
     }
 
-    /**
-     * ✅ AUTO TOKEN + AUTO SUBSCRIBE (PERMANENT FIX)
-     * - Does NOT prompt user
-     * - Only runs if permission already granted
-     * - ✅ Uses sync-topics API for reliability and invalid-token cleanup
-     * - ✅ Has fallback to old topic subscribe routes (so no break)
-     */
     async function autoEnsureTokenAndTopics() {
       logHeader("Auto Token + Topic Subscription");
 
@@ -264,7 +334,6 @@ export default function NotificationBootstrap() {
       const permission = Notification.permission;
       log("✅ Notification.permission:", permission);
 
-      // ✅ DO NOT prompt automatically (strict browser rules)
       if (permission === "default") {
         warn(
           "⚠️ Permission is DEFAULT (user never decided). Not auto-requesting. User must click Enable once."
@@ -277,7 +346,6 @@ export default function NotificationBootstrap() {
         return;
       }
 
-      // ✅ granted → proceed
       log("✅ Permission granted → ensuring SW + token + topic subscriptions");
 
       const user = auth.currentUser;
@@ -289,14 +357,12 @@ export default function NotificationBootstrap() {
       const uid = user.uid;
       log("✅ Logged in uid:", uid);
 
-      // Ensure SW
       const reg = await ensureMessagingServiceWorker();
       if (!reg) {
         warn("❌ Service worker missing → token cannot be created.");
         return;
       }
 
-      // ✅ token with recovery
       const token = await getFcmTokenWithRecovery();
       if (!token) {
         warn("❌ Token generation failed even after recovery.");
@@ -305,7 +371,6 @@ export default function NotificationBootstrap() {
 
       log("✅ Token OK:", token.slice(0, 20) + "...", "len=", token.length);
 
-      // ✅ Try sync-topics first (best permanent fix)
       const syncOk = await callSyncTopics(token);
       if (syncOk) {
         log("✅ Auto subscription complete via sync-topics ✅");
@@ -314,7 +379,6 @@ export default function NotificationBootstrap() {
 
       warn("⚠️ sync-topics failed → falling back to legacy subscribe routes");
 
-      // ✅ Legacy fallback (keeps existing working behavior)
       const isAdmin = await getAdminFlag();
       log("✅ isAdmin:", isAdmin);
 
@@ -335,14 +399,12 @@ export default function NotificationBootstrap() {
     async function init() {
       await debugBasics();
 
-      // ✅ shared env debug helper (extra logs)
       await debugNotificationEnvironment();
 
       await registerServiceWorker();
       await debugServiceWorker();
       await initForegroundListener();
 
-      // ✅ Permanent auto token+subscribe
       await autoEnsureTokenAndTopics();
 
       document.addEventListener("visibilitychange", () => {

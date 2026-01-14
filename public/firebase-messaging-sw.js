@@ -340,11 +340,30 @@ self.addEventListener("notificationclick", function (event) {
           const origin = new URL(client.url).origin;
           if (origin === new URL(CANONICAL_ORIGIN).origin) {
             log("✅ Focusing existing canonical client:", client.url);
+
+            // ✅ focus first
             await client.focus();
-            client.postMessage({
-              type: "NOTIFICATION_CLICKED",
-              url: safePath,
-            });
+
+            // ✅ NEW: navigate existing tab reliably (works even without postMessage listener)
+            try {
+              if (typeof client.navigate === "function") {
+                await client.navigate(targetUrl);
+                log("✅ client.navigate() ok:", targetUrl);
+              }
+            } catch (navErr) {
+              warn("⚠️ client.navigate failed:", navErr);
+            }
+
+            // ✅ keep existing behavior too (SPA can listen and route smoothly)
+            try {
+              client.postMessage({
+                type: "NOTIFICATION_CLICKED",
+                url: safePath,
+              });
+            } catch (pmErr) {
+              warn("⚠️ postMessage failed:", pmErr);
+            }
+
             return;
           }
         } catch {

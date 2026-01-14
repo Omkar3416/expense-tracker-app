@@ -27,6 +27,10 @@ type Props = {
   dueDate: string;
   setDueDate: (v: string) => void;
 
+  // ✅ NEW
+  dueTime: string;
+  setDueTime: (v: string) => void;
+
   note: string;
   setNote: (v: string) => void;
 
@@ -46,6 +50,8 @@ export default function BorrowingsAddForm({
   setCategory,
   dueDate,
   setDueDate,
+  dueTime,
+  setDueTime,
   note,
   setNote,
   categories,
@@ -100,6 +106,17 @@ export default function BorrowingsAddForm({
             type="date"
             value={dueDate}
             onChange={(e) => setDueDate(e.target.value)}
+            className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white outline-none focus:border-indigo-400/60 focus:ring-2 focus:ring-indigo-500/20 transition"
+          />
+        </div>
+
+        {/* ✅ NEW: Due time */}
+        <div className="space-y-1">
+          <p className="text-xs text-white/60">Due time (IST)</p>
+          <input
+            type="time"
+            value={dueTime}
+            onChange={(e) => setDueTime(e.target.value)}
             className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white outline-none focus:border-indigo-400/60 focus:ring-2 focus:ring-indigo-500/20 transition"
           />
         </div>

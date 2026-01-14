@@ -43,6 +43,11 @@ type Props = {
   setEditCategory: (v: BorrowingCategory) => void;
   editDueDate: string;
   setEditDueDate: (v: string) => void;
+
+  // ✅ NEW
+  editDueTime: string;
+  setEditDueTime: (v: string) => void;
+
   editNote: string;
   setEditNote: (v: string) => void;
   categories: CategoryOption[];
@@ -90,6 +95,8 @@ export default function BorrowingsModals(props: Props) {
           setEditCategory={props.setEditCategory}
           editDueDate={props.editDueDate}
           setEditDueDate={props.setEditDueDate}
+          editDueTime={props.editDueTime}
+          setEditDueTime={props.setEditDueTime}
           editNote={props.editNote}
           setEditNote={props.setEditNote}
           categories={props.categories}
@@ -131,6 +138,8 @@ function EditModal({
   setEditCategory,
   editDueDate,
   setEditDueDate,
+  editDueTime,
+  setEditDueTime,
   editNote,
   setEditNote,
   categories,
@@ -147,6 +156,11 @@ function EditModal({
   setEditCategory: (v: BorrowingCategory) => void;
   editDueDate: string;
   setEditDueDate: (v: string) => void;
+
+  // ✅ NEW
+  editDueTime: string;
+  setEditDueTime: (v: string) => void;
+
   editNote: string;
   setEditNote: (v: string) => void;
   categories: CategoryOption[];
@@ -163,7 +177,7 @@ function EditModal({
             <div>
               <h3 className="text-xl font-bold">Edit Borrowing</h3>
               <p className="text-xs text-white/60 mt-1">
-                Update person, amount, due date, type, category and note.
+                Update person, amount, due date, due time, type, category and note.
               </p>
             </div>
 
@@ -224,6 +238,17 @@ function EditModal({
               />
             </div>
 
+            {/* ✅ NEW: due time */}
+            <div className="space-y-1 md:col-span-2">
+              <p className="text-xs text-white/60">Due time (IST)</p>
+              <input
+                type="time"
+                value={editDueTime}
+                onChange={(e) => setEditDueTime(e.target.value)}
+                className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white outline-none focus:border-indigo-400/60 focus:ring-2 focus:ring-indigo-500/20 transition"
+              />
+            </div>
+
             <div className="md:col-span-2">
               <Input
                 placeholder="Note (optional)"
@@ -277,6 +302,7 @@ function DeleteModal({
             <p className="text-xs text-white/60 mt-1">
               {target.type.toUpperCase()} • ₹{formatMoney(target.amount)} • Due:{" "}
               {target.dueDate}
+              {target.dueTime ? ` ${target.dueTime} IST` : ""}
             </p>
             {target.note ? (
               <p className="text-xs text-white/50 mt-2">Note: {target.note}</p>

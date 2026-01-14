@@ -23,21 +23,30 @@ export type Borrowing = {
   person: string;
   amount: number;
 
-  // ✅ partial payments
   amountPaid: number;
-
-  // ✅ new: payment history
   payments?: BorrowingPayment[];
 
   type: BorrowingType;
   category: BorrowingCategory;
 
+  /**
+   * ✅ Existing behavior:
+   * dueDate stays as "YYYY-MM-DD" (used for daysUntil / overdue UI)
+   */
   dueDate: string;
-  note?: string;
 
+  /**
+   * ✅ New optional:
+   * dueTime = "HH:mm" (IST selection)
+   * dueAt = ISO UTC string computed from dueDate + dueTime (for server-side FCM later)
+   */
+  dueTime?: string;
+  dueAt?: string; // ISO UTC
+  timezone?: "Asia/Kolkata";
+
+  note?: string;
   status: BorrowingStatus;
 
-  // ✅ audit
   createdAt: string;
   updatedAt: string | null;
 
@@ -47,7 +56,6 @@ export type Borrowing = {
   updatedByUid?: string;
   updatedByEmail?: string | null;
 
-  // ✅ (kept for backward compatibility)
   paidAt: string | null;
 };
 
@@ -64,6 +72,18 @@ const initialState: BorrowingState = {
 };
 
 /* ---------------- Normalization helper ---------------- */
+
+function isBorrowingPayment(x: unknown): x is BorrowingPayment {
+  if (!x || typeof x !== "object") return false;
+  const obj = x as Record<string, unknown>;
+  return (
+    typeof obj.amount === "number" &&
+    Number.isFinite(obj.amount) &&
+    obj.amount > 0 &&
+    typeof obj.date === "string" &&
+    obj.date.trim().length > 0
+  );
+}
 
 function normalizeBorrowing(b: Borrowing): Borrowing {
   const raw = b as Partial<Borrowing> & Record<string, unknown>;
@@ -106,22 +126,22 @@ function normalizeBorrowing(b: Borrowing): Borrowing {
   const dueDate =
     typeof raw.dueDate === "string" && raw.dueDate.trim().length > 0 ? raw.dueDate : "";
 
-  // ✅ normalize payments
+  const dueTime =
+    typeof raw.dueTime === "string" && raw.dueTime.trim().length > 0
+      ? raw.dueTime
+      : undefined;
+
+  const dueAt =
+    typeof raw.dueAt === "string" && raw.dueAt.trim().length > 0 ? raw.dueAt : undefined;
+
+  const timezone: "Asia/Kolkata" | undefined =
+    raw.timezone === "Asia/Kolkata" ? "Asia/Kolkata" : undefined;
+
+  // ✅ normalize payments (type-safe)
   const paymentsRaw = raw.payments;
-  const payments =
-    Array.isArray(paymentsRaw)
-      ? paymentsRaw
-          .map((p) => {
-            const x = p as Partial<{ amount: unknown; date: unknown }>;
-            const amt =
-              typeof x.amount === "number" && Number.isFinite(x.amount) ? x.amount : 0;
-            const date =
-              typeof x.date === "string" && x.date.trim().length > 0 ? x.date : "";
-            if (!date || amt <= 0) return null;
-            return { amount: amt, date };
-          })
-          .filter(Boolean) as BorrowingPayment[]
-      : [];
+  const payments: BorrowingPayment[] = Array.isArray(paymentsRaw)
+    ? paymentsRaw.filter(isBorrowingPayment)
+    : [];
 
   // ✅ if payments exist, keep amountPaid in sync (safe)
   const computedPaid =
@@ -131,7 +151,7 @@ function normalizeBorrowing(b: Borrowing): Borrowing {
 
   const finalPaidAt =
     computedPaid >= safeAmount
-      ? (paidAt ?? payments.sort((a, b) => a.date.localeCompare(b.date)).at(-1)?.date ?? now)
+      ? paidAt ?? payments.slice().sort((a, b) => a.date.localeCompare(b.date)).at(-1)?.date ?? now
       : null;
 
   return {
@@ -145,6 +165,9 @@ function normalizeBorrowing(b: Borrowing): Borrowing {
     createdAt,
     updatedAt,
     dueDate,
+    dueTime,
+    dueAt,
+    timezone: timezone ?? b.timezone ?? undefined,
   };
 }
 
@@ -191,7 +214,6 @@ const borrowingSlice = createSlice({
   },
   extraReducers: (builder) => {
     builder
-      // fetch
       .addCase(fetchBorrowings.pending, (state) => {
         state.loading = true;
         state.error = undefined;
@@ -206,7 +228,6 @@ const borrowingSlice = createSlice({
         state.error = action.error.message ?? "Failed to load borrowings";
       })
 
-      // upsert
       .addCase(upsertBorrowingToRepo.pending, (state) => {
         state.loading = true;
         state.error = undefined;
@@ -224,7 +245,6 @@ const borrowingSlice = createSlice({
         state.error = action.error.message ?? "Failed to save borrowing";
       })
 
-      // delete
       .addCase(deleteBorrowingFromRepo.pending, (state) => {
         state.loading = true;
         state.error = undefined;
@@ -242,8 +262,6 @@ const borrowingSlice = createSlice({
 });
 
 export const { setAllBorrowings, clearBorrowings } = borrowingSlice.actions;
-
-/* ---------------- Selectors ---------------- */
 
 export const selectBorrowings = (s: RootState) => s.borrowings.list;
 export const selectBorrowingsLoading = (s: RootState) => s.borrowings.loading;

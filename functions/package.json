@@ -1,0 +1,20 @@
+{
+  "name": "expense-tracker-functions",
+  "private": true,
+  "main": "lib/index.js",
+  "engines": {
+    "node": "18"
+  },
+  "scripts": {
+    "lint": "echo \"skip lint\"",
+    "build": "tsc",
+    "deploy": "firebase deploy --only functions"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.7.0",
+    "firebase-functions": "^5.1.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}
