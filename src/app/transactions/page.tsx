@@ -9,7 +9,6 @@ import Button from "@/components/ui/Button";
 import ModalPortal from "@/components/ui/ModalPortal";
 import UndoBar from "@/components/ui/UndoBar";
 
-import TransactionRow from "@/components/transactions/TransactionRow";
 import TransactionsRangeHistorySection from "@/components/transactions/TransactionsRangeHistorySection";
 
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
@@ -35,7 +34,7 @@ const categories = ["Food", "Travel", "Bills", "Shopping", "Other"];
 
 type TxTypeFilter = "all" | "expense" | "income";
 type TxSortKey = "date_desc" | "date_asc" | "amount_desc" | "amount_asc";
-type HistoryViewMode = "list" | "range";
+// type HistoryViewMode = "list" | "range";
 
 export default function TransactionsPage() {
   const user = useAuthUser();
@@ -59,9 +58,6 @@ export default function TransactionsPage() {
   // ✅ prevents repeated open in StrictMode + repeated rerenders
   const handledOpenIdRef = useRef<string | null>(null);
   const openInProgressRef = useRef<boolean>(false);
-
-  // ✅ history view mode (safe toggle)
-  // const [historyView, setHistoryView] = useState<HistoryViewMode>("list");
 
   // ---------- Add Form ----------
   const [type, setType] = useState<"expense" | "income">("expense");
@@ -266,7 +262,7 @@ export default function TransactionsPage() {
     // ✅ remove this restored tx from trash (optional)
     const all = loadTrash(uid);
     const match = all.find(
-      (x) => x.kind === "transaction" && x.item.id === undoTx.id
+      (x) => x.kind === "transaction" && isTransaction(x.item) && x.item.id === undoTx.id
     );
     if (match) {
       removeTrashItem(uid, match.deletedAt);
@@ -611,33 +607,6 @@ export default function TransactionsPage() {
             >
               Reset
             </button>
-
-            {/* ✅ View Toggle */}
-            {/* <div className="ml-auto flex items-center gap-2">
-              <button
-                onClick={() => setHistoryView("list")}
-                className={[
-                  "rounded-xl border px-4 py-2 text-xs font-semibold transition",
-                  historyView === "list"
-                    ? "border-indigo-400/30 bg-indigo-500/10 text-indigo-100"
-                    : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10",
-                ].join(" ")}
-              >
-                List View
-              </button>
-
-              <button
-                onClick={() => setHistoryView("range")}
-                className={[
-                  "rounded-xl border px-4 py-2 text-xs font-semibold transition",
-                  historyView === "range"
-                    ? "border-indigo-400/30 bg-indigo-500/10 text-indigo-100"
-                    : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10",
-                ].join(" ")}
-              >
-                Range View
-              </button>
-            </div> */}
           </div>
 
           {loading && (
@@ -645,54 +614,17 @@ export default function TransactionsPage() {
           )}
 
           {/* ✅ History Output */}
-          {
-            /* {historyView === "list" ? (
-            <div className="mt-6 space-y-3">
-              {filtered.length === 0 ? (
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-10 text-center text-white/50">
-                  No transactions found.
-                </div>
-              ) : (
-                filtered.map((t) => (
-                  <TransactionRow
-                    key={t.id}
-                    t={t}
-                    isHighlighted={highlightId === t.id}
-                    itemRefs={itemRefs}
-                    onEdit={openEdit}
-                    onShare={shareTransaction}
-                    onDelete={requestDelete}
-                    timeAgo={timeAgo}
-                    formatMoney={formatMoney}
-                  />
-                ))
-              )}
-            </div>
-          ) : (
-            <TransactionsRangeHistorySection
-              transactions={filtered}
-              monthName={monthName}
-              formatMoney={formatMoney}
-              timeAgo={timeAgo}
-              itemRefs={itemRefs}
-              highlightId={highlightId}
-              onEdit={openEdit}
-              onShare={shareTransaction}
-              onDelete={requestDelete}
-            />
-          )} */
-            <TransactionsRangeHistorySection
-              transactions={filtered}
-              monthName={monthName}
-              formatMoney={formatMoney}
-              timeAgo={timeAgo}
-              itemRefs={itemRefs}
-              highlightId={highlightId}
-              onEdit={openEdit}
-              onShare={shareTransaction}
-              onDelete={requestDelete}
-            />
-          }
+          <TransactionsRangeHistorySection
+            transactions={filtered}
+            monthName={monthName}
+            formatMoney={formatMoney}
+            timeAgo={timeAgo}
+            itemRefs={itemRefs}
+            highlightId={highlightId}
+            onEdit={openEdit}
+            onShare={shareTransaction}
+            onDelete={requestDelete}
+          />
         </div>
       </div>
 
@@ -757,7 +689,9 @@ export default function TransactionsPage() {
                   </div>
                 ) : (
                   txTrash.map((x) => {
-                    const item = x.item as Transaction;
+                    const item = isTransaction(x.item) ? x.item : null;
+                    if (!item) return null;
+
                     return (
                       <div
                         key={x.deletedAt}
@@ -1016,6 +950,19 @@ export default function TransactionsPage() {
 }
 
 /* ---------------- helpers ---------------- */
+
+function isTransaction(x: unknown): x is Transaction {
+  if (typeof x !== "object" || x === null) return false;
+  const o = x as Record<string, unknown>;
+  return (
+    typeof o.id === "string" &&
+    typeof o.category === "string" &&
+    (o.type === "expense" || o.type === "income") &&
+    typeof o.amount === "number" &&
+    typeof o.date === "string" &&
+    typeof o.createdAt === "string"
+  );
+}
 
 function todayISO() {
   const d = new Date();

@@ -10,18 +10,23 @@ import {
   verifyPasswordResetCode,
   type ActionCodeInfo,
 } from "firebase/auth";
+import type { FirebaseError } from "firebase/app";
 import { auth } from "@/lib/firebaseClient";
 import Button from "@/components/ui/Button";
 import Input from "@/components/ui/Input";
 
 type Mode = "verifyEmail" | "resetPassword" | "action" | null;
 
-function getParam(sp: URLSearchParams, key: string): string | null {
+type SearchParamsLike = {
+  get(key: string): string | null;
+};
+
+function getParam(sp: SearchParamsLike, key: string): string | null {
   const v = sp.get(key);
   return v ? v.trim() : null;
 }
 
-function getContinueUrl(searchParams: URLSearchParams): string | null {
+function getContinueUrl(searchParams: SearchParamsLike): string | null {
   const raw = getParam(searchParams, "continueUrl");
   if (!raw) return null;
 
@@ -31,6 +36,13 @@ function getContinueUrl(searchParams: URLSearchParams): string | null {
   } catch {
     return null;
   }
+}
+
+function getFirebaseErrorCode(e: unknown): string | null {
+  // FirebaseError has `code` like "auth/expired-action-code"
+  const fe = e as Partial<FirebaseError> | null;
+  const code = fe?.code;
+  return typeof code === "string" && code.trim().length > 0 ? code : null;
 }
 
 export default function ResetPasswordClient() {
@@ -49,19 +61,20 @@ export default function ResetPasswordClient() {
 
 function ResetPasswordInner() {
   const router = useRouter();
-  const searchParams = useSearchParams();
+  const searchParams = useSearchParams(); // ReadonlyURLSearchParams
 
   const mode = useMemo<Mode>(() => {
-    return (getParam(searchParams as unknown as URLSearchParams, "mode") ??
-      null) as Mode;
+    const m = getParam(searchParams, "mode");
+    if (m === "verifyEmail" || m === "resetPassword" || m === "action") return m;
+    return null;
   }, [searchParams]);
 
   const oobCode = useMemo<string | null>(() => {
-    return getParam(searchParams as unknown as URLSearchParams, "oobCode");
+    return getParam(searchParams, "oobCode");
   }, [searchParams]);
 
   const continueUrl = useMemo<string | null>(() => {
-    return getContinueUrl(searchParams as unknown as URLSearchParams);
+    return getContinueUrl(searchParams);
   }, [searchParams]);
 
   const [loading, setLoading] = useState(true);
@@ -94,16 +107,13 @@ function ResetPasswordInner() {
         if (mode === "verifyEmail") {
           await checkActionCode(auth, oobCode);
           await applyActionCode(auth, oobCode);
-
           setStatus("✅ Email verified successfully. Please login again.");
-          setLoading(false);
           return;
         }
 
         if (mode === "resetPassword") {
           await verifyPasswordResetCode(auth, oobCode);
           setResetReady(true);
-          setLoading(false);
           return;
         }
 
@@ -114,7 +124,6 @@ function ResetPasswordInner() {
             await applyActionCode(auth, oobCode);
             setActionResolved("verifyEmail");
             setStatus("✅ Email verified successfully. Please login again.");
-            setLoading(false);
             return;
           }
 
@@ -122,22 +131,20 @@ function ResetPasswordInner() {
             await verifyPasswordResetCode(auth, oobCode);
             setActionResolved("resetPassword");
             setResetReady(true);
-            setLoading(false);
             return;
           }
 
           setError("Unsupported action. Please request a new link.");
-          setLoading(false);
           return;
         }
 
         setError("Unsupported action.");
       } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : "";
+        const code = getFirebaseErrorCode(e);
 
-        if (msg.includes("auth/expired-action-code")) {
+        if (code === "auth/expired-action-code") {
           setError("This link has expired. Please request a new one.");
-        } else if (msg.includes("auth/invalid-action-code")) {
+        } else if (code === "auth/invalid-action-code") {
           setError("Invalid link. Please request a new one.");
         } else {
           setError("Invalid or expired link. Please request again.");
@@ -175,9 +182,12 @@ function ResetPasswordInner() {
       setStatus("✅ Password reset successfully. Please login again.");
       setResetReady(false);
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : "";
-      if (msg.includes("auth/expired-action-code")) {
+      const code = getFirebaseErrorCode(e);
+
+      if (code === "auth/expired-action-code") {
         setError("This link has expired. Please request a new one.");
+      } else if (code === "auth/invalid-action-code") {
+        setError("Invalid link. Please request a new one.");
       } else {
         setError("Password reset failed. Please request again.");
       }

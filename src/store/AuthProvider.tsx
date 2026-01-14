@@ -25,15 +25,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setUser(u);
 
       /**
-       * ✅ IMPORTANT: We MUST have email for our app
-       * because Firestore user doc ID is email.
+       * ✅ IMPORTANT:
+       * We still require email for app features,
+       * but Firestore user doc ID is UID (NOT email).
        */
       const email = u?.email?.trim().toLowerCase() ?? null;
 
       // ✅ Only create/update user profile if:
       // - user exists
       // - email exists
-      // - email is verified (or email missing, but we block missing anyway)
+      // - email is verified
       if (u && email && u.emailVerified) {
         const profile: UserProfile = {
           uid: u.uid,

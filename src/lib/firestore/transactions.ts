@@ -14,65 +14,84 @@ import {
 } from "firebase/firestore";
 
 /**
- * ✅ userKey = emailLowercase
- * Example: "demo@gmail.com"
+ * ✅ UID-based Firestore path (STRICT):
+ * users/{uid}/transactions/{txId}
+ * users/{uid}/deletedTransactions/{txId}
  */
-function txCol(userKey: string) {
-  return collection(db, "users", userKey, "transactions");
+function txCol(uid: string) {
+  return collection(db, "users", uid, "transactions");
 }
 
-function deletedTxCol(userKey: string) {
-  return collection(db, "users", userKey, "deletedTransactions");
+function deletedTxCol(uid: string) {
+  return collection(db, "users", uid, "deletedTransactions");
 }
 
-type FirestoreTxData = Partial<Record<keyof Transaction, unknown>> &
-  Record<string, unknown>;
+/* ---------------- debug helpers (logs only) ---------------- */
+
+function getProjectId(): string | null {
+  // FirebaseOptions.projectId exists and is typed
+  return typeof db.app.options.projectId === "string" ? db.app.options.projectId : null;
+}
+
+function debugEnabled(): boolean {
+  // Logs only in browser + dev to avoid noisy production logs
+  return (
+    typeof window !== "undefined" &&
+    (process.env.NODE_ENV !== "production")
+  );
+}
+
+function logWrite(tag: string, payload: Record<string, unknown>) {
+  if (!debugEnabled()) return;
+  console.debug(`[firestore][transactions] ${tag}`, {
+    projectId: getProjectId(),
+    ...payload,
+  });
+}
+
+/* ---------------- safe helpers ---------------- */
+
+type AnyRecord = Record<string, unknown>;
+
+function asRecord(value: unknown): AnyRecord {
+  if (value && typeof value === "object") return value as AnyRecord;
+  return {};
+}
+
+function isNonEmptyString(v: unknown): v is string {
+  return typeof v === "string" && v.trim().length > 0;
+}
+
+function isString(v: unknown): v is string {
+  return typeof v === "string";
+}
+
+function isStringOrNull(v: unknown): v is string | null {
+  return typeof v === "string" || v === null;
+}
+
+function isFiniteNumber(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v);
+}
 
 function normalizeTx(id: string, data: unknown): Transaction {
   const now = new Date().toISOString();
-  const d = (data ?? {}) as FirestoreTxData;
+  const d = asRecord(data);
 
-  const amount =
-    typeof d.amount === "number" && Number.isFinite(d.amount) ? d.amount : 0;
-
-  const category =
-    typeof d.category === "string" && d.category.trim().length > 0
-      ? d.category
-      : "Other";
-
-  const note =
-    typeof d.note === "string" && d.note.trim().length > 0 ? d.note : undefined;
-
-  const date =
-    typeof d.date === "string" && d.date.trim().length > 0 ? d.date : now;
-
+  const amount = isFiniteNumber(d.amount) ? d.amount : 0;
+  const category = isNonEmptyString(d.category) ? d.category : "Other";
+  const note = isNonEmptyString(d.note) ? d.note : undefined;
+  const date = isNonEmptyString(d.date) ? d.date : now;
   const type = d.type === "income" || d.type === "expense" ? d.type : "expense";
 
-  const createdAt =
-    typeof d.createdAt === "string" && d.createdAt.trim().length > 0
-      ? d.createdAt
-      : now;
+  const createdAt = isNonEmptyString(d.createdAt) ? d.createdAt : now;
+  const updatedAt = isNonEmptyString(d.updatedAt) ? d.updatedAt : null;
 
-  const updatedAt =
-    typeof d.updatedAt === "string" && d.updatedAt.trim().length > 0
-      ? d.updatedAt
-      : null;
+  const createdByUid = isString(d.createdByUid) ? d.createdByUid : undefined;
+  const createdByEmail = isStringOrNull(d.createdByEmail) ? d.createdByEmail : undefined;
 
-  const createdByUid =
-    typeof d.createdByUid === "string" ? d.createdByUid : undefined;
-
-  const createdByEmail =
-    typeof d.createdByEmail === "string" || d.createdByEmail === null
-      ? (d.createdByEmail as string | null)
-      : undefined;
-
-  const updatedByUid =
-    typeof d.updatedByUid === "string" ? d.updatedByUid : undefined;
-
-  const updatedByEmail =
-    typeof d.updatedByEmail === "string" || d.updatedByEmail === null
-      ? (d.updatedByEmail as string | null)
-      : undefined;
+  const updatedByUid = isString(d.updatedByUid) ? d.updatedByUid : undefined;
+  const updatedByEmail = isStringOrNull(d.updatedByEmail) ? d.updatedByEmail : undefined;
 
   return {
     id,
@@ -90,8 +109,10 @@ function normalizeTx(id: string, data: unknown): Transaction {
   };
 }
 
-export async function fetchUserTransactions(userKey: string): Promise<Transaction[]> {
-  const q = query(txCol(userKey), orderBy("date", "desc"));
+export async function fetchUserTransactions(uid: string): Promise<Transaction[]> {
+  logWrite("fetch:start", { uid, collectionPath: `users/${uid}/transactions` });
+
+  const q = query(txCol(uid), orderBy("date", "desc"));
   const snap = await getDocs(q);
 
   const list: Transaction[] = [];
@@ -99,13 +120,14 @@ export async function fetchUserTransactions(userKey: string): Promise<Transactio
     list.push(normalizeTx(d.id, d.data()));
   });
 
+  logWrite("fetch:done", { uid, count: list.length });
   return list;
 }
 
-export async function fetchUserDeletedTransactions(
-  userKey: string
-): Promise<Transaction[]> {
-  const q = query(deletedTxCol(userKey), orderBy("date", "desc"));
+export async function fetchUserDeletedTransactions(uid: string): Promise<Transaction[]> {
+  logWrite("fetchDeleted:start", { uid, collectionPath: `users/${uid}/deletedTransactions` });
+
+  const q = query(deletedTxCol(uid), orderBy("date", "desc"));
   const snap = await getDocs(q);
 
   const list: Transaction[] = [];
@@ -113,11 +135,20 @@ export async function fetchUserDeletedTransactions(
     list.push(normalizeTx(d.id, d.data()));
   });
 
+  logWrite("fetchDeleted:done", { uid, count: list.length });
   return list;
 }
 
-export async function createOrReplaceTransaction(userKey: string, tx: Transaction) {
-  const ref = doc(db, "users", userKey, "transactions", tx.id);
+export async function createOrReplaceTransaction(uid: string, tx: Transaction): Promise<void> {
+  const ref = doc(db, "users", uid, "transactions", tx.id);
+
+  logWrite("upsert:start", {
+    uid,
+    id: tx.id,
+    docPath: ref.path,
+    type: tx.type,
+    amount: tx.amount,
+  });
 
   await setDoc(
     ref,
@@ -139,13 +170,17 @@ export async function createOrReplaceTransaction(userKey: string, tx: Transactio
     },
     { merge: true }
   );
+
+  logWrite("upsert:done", { uid, id: tx.id, docPath: ref.path });
 }
 
 export async function createOrReplaceDeletedTransaction(
-  userKey: string,
+  uid: string,
   tx: Transaction
-) {
-  const ref = doc(db, "users", userKey, "deletedTransactions", tx.id);
+): Promise<void> {
+  const ref = doc(db, "users", uid, "deletedTransactions", tx.id);
+
+  logWrite("upsertDeleted:start", { uid, id: tx.id, docPath: ref.path });
 
   await setDoc(
     ref,
@@ -169,20 +204,30 @@ export async function createOrReplaceDeletedTransaction(
     },
     { merge: true }
   );
+
+  logWrite("upsertDeleted:done", { uid, id: tx.id, docPath: ref.path });
 }
 
-export async function deleteTransactionById(userKey: string, id: string) {
-  const ref = doc(db, "users", userKey, "transactions", id);
+export async function deleteTransactionById(uid: string, id: string): Promise<void> {
+  const ref = doc(db, "users", uid, "transactions", id);
+
+  logWrite("delete:start", { uid, id, docPath: ref.path });
   await deleteDoc(ref);
+  logWrite("delete:done", { uid, id, docPath: ref.path });
 }
 
-export async function deleteDeletedTransactionById(userKey: string, id: string) {
-  const ref = doc(db, "users", userKey, "deletedTransactions", id);
+export async function deleteDeletedTransactionById(uid: string, id: string): Promise<void> {
+  const ref = doc(db, "users", uid, "deletedTransactions", id);
+
+  logWrite("deleteDeleted:start", { uid, id, docPath: ref.path });
   await deleteDoc(ref);
+  logWrite("deleteDeleted:done", { uid, id, docPath: ref.path });
 }
 
-export async function deleteAllDeletedTransactions(userKey: string) {
-  const snap = await getDocs(deletedTxCol(userKey));
+export async function deleteAllDeletedTransactions(uid: string): Promise<void> {
+  logWrite("deleteAllDeleted:start", { uid });
+
+  const snap = await getDocs(deletedTxCol(uid));
   const deletes: Promise<void>[] = [];
 
   snap.forEach((d) => {
@@ -190,4 +235,6 @@ export async function deleteAllDeletedTransactions(userKey: string) {
   });
 
   await Promise.all(deletes);
+
+  logWrite("deleteAllDeleted:done", { uid, deletedCount: snap.size });
 }

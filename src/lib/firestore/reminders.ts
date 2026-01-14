@@ -14,11 +14,41 @@ import {
 } from "firebase/firestore";
 
 /**
- * ✅ userKey = emailLowercase
+ * ✅ userKey = UID (NOT email)
+ * Firestore path:
+ * - users/{uid}/reminders/{reminderId}
+ * - users/{uid}/deletedReminders/{reminderId}
  */
-function remindersCol(userKey: string) {
-  return collection(db, "users", userKey, "reminders");
+function remindersCol(uid: string) {
+  return collection(db, "users", uid, "reminders");
 }
+
+function deletedRemindersCol(uid: string) {
+  return collection(db, "users", uid, "deletedReminders");
+}
+
+/* ---------------- debug helpers (logs only) ---------------- */
+
+function getProjectId(): string | null {
+  return typeof db.app.options.projectId === "string" ? db.app.options.projectId : null;
+}
+
+function debugEnabled(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    (process.env.NODE_ENV !== "production")
+  );
+}
+
+function logWrite(tag: string, payload: Record<string, unknown>) {
+  if (!debugEnabled()) return;
+  console.debug(`[firestore][reminders] ${tag}`, {
+    projectId: getProjectId(),
+    ...payload,
+  });
+}
+
+/* ---------------- normalizers ---------------- */
 
 type FirestoreReminderData = Partial<Record<keyof Reminder, unknown>> &
   Record<string, unknown>;
@@ -90,14 +120,10 @@ function normalizeReminder(id: string, data: unknown): Reminder {
       : undefined;
 
   const createdAt =
-    typeof d.createdAt === "string" && d.createdAt.trim().length > 0
-      ? d.createdAt
-      : now;
+    typeof d.createdAt === "string" && d.createdAt.trim().length > 0 ? d.createdAt : now;
 
   const updatedAt =
-    typeof d.updatedAt === "string" && d.updatedAt.trim().length > 0
-      ? d.updatedAt
-      : null;
+    typeof d.updatedAt === "string" && d.updatedAt.trim().length > 0 ? d.updatedAt : null;
 
   const createdByUid =
     typeof d.createdByUid === "string" ? d.createdByUid : undefined;
@@ -139,8 +165,10 @@ function normalizeReminder(id: string, data: unknown): Reminder {
   };
 }
 
-export async function fetchUserReminders(userKey: string): Promise<Reminder[]> {
-  const q = query(remindersCol(userKey), orderBy("createdAt", "desc"));
+export async function fetchUserReminders(uid: string): Promise<Reminder[]> {
+  logWrite("fetch:start", { uid, collectionPath: `users/${uid}/reminders` });
+
+  const q = query(remindersCol(uid), orderBy("createdAt", "desc"));
   const snap = await getDocs(q);
 
   const list: Reminder[] = [];
@@ -148,11 +176,20 @@ export async function fetchUserReminders(userKey: string): Promise<Reminder[]> {
     list.push(normalizeReminder(d.id, d.data()));
   });
 
+  logWrite("fetch:done", { uid, count: list.length });
   return list;
 }
 
-export async function createOrReplaceReminder(userKey: string, r: Reminder) {
-  const ref = doc(db, "users", userKey, "reminders", r.id);
+export async function createOrReplaceReminder(uid: string, r: Reminder) {
+  const ref = doc(db, "users", uid, "reminders", r.id);
+
+  logWrite("upsert:start", {
+    uid,
+    id: r.id,
+    docPath: ref.path,
+    title: r.title,
+    frequency: r.frequency,
+  });
 
   await setDoc(
     ref,
@@ -186,9 +223,61 @@ export async function createOrReplaceReminder(userKey: string, r: Reminder) {
     },
     { merge: true }
   );
+
+  logWrite("upsert:done", { uid, id: r.id, docPath: ref.path });
 }
 
-export async function deleteReminderById(userKey: string, id: string) {
-  const ref = doc(db, "users", userKey, "reminders", id);
+export async function deleteReminderById(uid: string, id: string) {
+  const ref = doc(db, "users", uid, "reminders", id);
+
+  logWrite("delete:start", { uid, id, docPath: ref.path });
   await deleteDoc(ref);
+  logWrite("delete:done", { uid, id, docPath: ref.path });
+}
+
+/**
+ * ✅ Optional: keep deleted reminders history in Firestore too
+ * Path: users/{uid}/deletedReminders/{id}
+ */
+export async function writeDeletedReminder(uid: string, r: Reminder) {
+  const ref = doc(db, "users", uid, "deletedReminders", r.id);
+
+  logWrite("writeDeleted:start", { uid, id: r.id, docPath: ref.path });
+
+  await setDoc(
+    ref,
+    {
+      ...r,
+      amount: typeof r.amount === "number" ? r.amount : null,
+      note: r.note ?? "",
+      intervalDays: typeof r.intervalDays === "number" ? r.intervalDays : null,
+      repeatEvery: typeof r.repeatEvery === "number" ? r.repeatEvery : null,
+      pausedAt: r.pausedAt ?? null,
+      completedAt: r.completedAt ?? null,
+      linkedTransactionId: r.linkedTransactionId ?? null,
+      updatedAt: r.updatedAt ?? new Date().toISOString(),
+      createdByUid: r.createdByUid ?? null,
+      createdByEmail: r.createdByEmail ?? null,
+      updatedByUid: r.updatedByUid ?? null,
+      updatedByEmail: r.updatedByEmail ?? null,
+    },
+    { merge: true }
+  );
+
+  logWrite("writeDeleted:done", { uid, id: r.id, docPath: ref.path });
+}
+
+export async function fetchUserDeletedReminders(uid: string): Promise<Reminder[]> {
+  logWrite("fetchDeleted:start", { uid, collectionPath: `users/${uid}/deletedReminders` });
+
+  const q = query(deletedRemindersCol(uid), orderBy("updatedAt", "desc"));
+  const snap = await getDocs(q);
+
+  const list: Reminder[] = [];
+  snap.forEach((d) => {
+    list.push(normalizeReminder(d.id, d.data()));
+  });
+
+  logWrite("fetchDeleted:done", { uid, count: list.length });
+  return list;
 }

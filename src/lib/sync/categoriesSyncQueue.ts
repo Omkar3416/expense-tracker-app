@@ -2,21 +2,42 @@
 
 import type { Category } from "@/store/features/categories/categorySlice";
 
-type QueueItem =
-  | { kind: "upsert"; category: Category }
-  | { kind: "delete"; id: string };
+type QueueUpsert = { kind: "upsert"; category: Category };
+type QueueDelete = { kind: "delete"; id: string };
+type QueueItem = QueueUpsert | QueueDelete;
 
 function queueKey(uid: string) {
   return `expense-tracker:categories-sync-queue:${uid}`;
 }
 
+function isQueueItem(x: unknown): x is QueueItem {
+  if (typeof x !== "object" || x === null) return false;
+
+  const obj = x as Record<string, unknown>;
+  const kind = obj.kind;
+
+  if (kind === "upsert") {
+    return typeof obj.category === "object" && obj.category !== null;
+  }
+
+  if (kind === "delete") {
+    return typeof obj.id === "string" && obj.id.trim().length > 0;
+  }
+
+  return false;
+}
+
 export function readCategoriesQueue(uid: string): QueueItem[] {
   if (typeof window === "undefined") return [];
+
   try {
     const raw = localStorage.getItem(queueKey(uid));
     if (!raw) return [];
+
     const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as QueueItem[]) : [];
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed.filter(isQueueItem);
   } catch {
     return [];
   }
@@ -24,6 +45,7 @@ export function readCategoriesQueue(uid: string): QueueItem[] {
 
 export function writeCategoriesQueue(uid: string, items: QueueItem[]) {
   if (typeof window === "undefined") return;
+
   try {
     localStorage.setItem(queueKey(uid), JSON.stringify(items));
   } catch {

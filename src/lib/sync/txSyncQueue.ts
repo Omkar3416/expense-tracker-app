@@ -2,7 +2,7 @@
 
 import type { Transaction } from "@/store/features/transactions/transactionSlice";
 
-type QueueItem =
+export type TxQueueItem =
   | { kind: "upsert"; tx: Transaction }
   | { kind: "delete"; id: string };
 
@@ -10,19 +10,35 @@ function queueKey(uid: string) {
   return `expense-tracker:tx-sync-queue:${uid}`;
 }
 
-export function readTxQueue(uid: string): QueueItem[] {
+function isTxQueueItem(x: unknown): x is TxQueueItem {
+  if (typeof x !== "object" || x === null) return false;
+  const obj = x as Record<string, unknown>;
+
+  if (obj.kind === "upsert") {
+    return typeof obj.tx === "object" && obj.tx !== null;
+  }
+
+  if (obj.kind === "delete") {
+    return typeof obj.id === "string" && obj.id.trim().length > 0;
+  }
+
+  return false;
+}
+
+export function readTxQueue(uid: string): TxQueueItem[] {
   if (typeof window === "undefined") return [];
   try {
     const raw = localStorage.getItem(queueKey(uid));
     if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(isTxQueueItem);
   } catch {
     return [];
   }
 }
 
-export function writeTxQueue(uid: string, items: QueueItem[]) {
+export function writeTxQueue(uid: string, items: TxQueueItem[]) {
   if (typeof window === "undefined") return;
   try {
     localStorage.setItem(queueKey(uid), JSON.stringify(items));

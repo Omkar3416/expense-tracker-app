@@ -11,25 +11,23 @@ export type UserProfile = {
   updatedAt?: unknown;
 };
 
-function normalizeEmail(email: string) {
-  return email.trim().toLowerCase();
-}
-
 /**
- * ✅ Firestore user doc ID rule:
- * - ALWAYS use email as document ID
- * - This app depends on email (Google login / Email login)
+ * ✅ Firestore user doc ID rule (STRICT):
+ * - ALWAYS use UID as document ID
+ *
+ * Path:
+ * - users/{uid}
  */
 function userDocId(profile: UserProfile): string {
-  const email = profile.email?.trim();
-  if (!email) {
-    throw new Error("User email missing. Cannot create user profile doc without email.");
+  const uid = profile.uid?.trim();
+  if (!uid) {
+    throw new Error("User uid missing. Cannot create user profile doc without uid.");
   }
-  return normalizeEmail(email);
+  return uid;
 }
 
-function userRef(userId: string) {
-  return doc(db, "users", userId);
+function userRef(uid: string) {
+  return doc(db, "users", uid);
 }
 
 export async function ensureUserProfile(profile: UserProfile): Promise<void> {
@@ -37,23 +35,22 @@ export async function ensureUserProfile(profile: UserProfile): Promise<void> {
   const ref = userRef(id);
   const snap = await getDoc(ref);
 
-  if (!snap.exists()) {
-    await setDoc(ref, {
-      uid: profile.uid,
-      email: profile.email ?? null,
-      name: profile.name ?? "",
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-    return;
-  }
-
-  await updateDoc(ref, {
+  const payload = {
     uid: profile.uid,
     email: profile.email ?? null,
     name: profile.name ?? "",
     updatedAt: serverTimestamp(),
-  });
+  };
+
+  if (!snap.exists()) {
+    await setDoc(ref, {
+      ...payload,
+      createdAt: serverTimestamp(),
+    });
+    return;
+  }
+
+  await updateDoc(ref, payload);
 }
 
 export async function upsertUserProfile(profile: UserProfile): Promise<void> {
