@@ -3,6 +3,7 @@
 import type { Reminder } from "@/store/features/reminders/reminderSlice";
 import { getDataMode } from "@/lib/dataMode";
 import { auth } from "@/lib/firebaseClient";
+import { onAuthStateChanged } from "firebase/auth";
 
 import {
   loadReminders,
@@ -20,25 +21,153 @@ import {
   clearRemindersQueue,
 } from "@/lib/sync/remindersSyncQueue";
 
+import {
+  fetchUserReminders,
+  createOrReplaceReminder,
+  deleteReminderById,
+  writeDeletedReminder,
+} from "@/lib/firestore/reminders";
+
 /**
- * ✅ This repo is LOCAL-FIRST (just like transactionsRepo.ts)
- * - If DataMode = local: only local storage
- * - If user not logged in: local storage
- * - If user logged in: still local, but queue is built for later Firestore sync
- *
- * We are NOT integrating Firestore yet because:
- * - reminders need rules + email-based userKey logic + collections
- * - you want "no breaking changes"
- *
- * ✅ So we build it stable now, and later enable Firestore sync safely.
+ * ✅ Firestore user document key = UID (NOT email)
+ * Firestore path:
+ * users/{uid}/reminders/{id}
+ * users/{uid}/deletedReminders/{id}
  */
 
-function getEditorIdentity() {
+type ErrorInfo = { code?: string; message?: string };
+
+function readErrorInfo(err: unknown): ErrorInfo {
+  if (!err || typeof err !== "object") return {};
+  const rec = err as Record<string, unknown>;
+
+  const code = typeof rec.code === "string" ? rec.code : undefined;
+  const message =
+    typeof rec.message === "string"
+      ? rec.message
+      : err instanceof Error
+      ? err.message
+      : undefined;
+
+  return { code, message };
+}
+
+function getEditorIdentity(): { uid: string | undefined; email: string | null } {
   const u = auth.currentUser;
   return {
     uid: u?.uid,
     email: u?.email ?? null,
   };
+}
+
+/**
+ * ✅ UID-only Firestore key rule:
+ * - UID must exist
+ * - must match current authenticated user uid
+ */
+function getFirestoreUserKey(uid?: string): string | null {
+  if (!uid) return null;
+  const u = auth.currentUser;
+  if (!u) return null;
+  if (u.uid !== uid) return null;
+  return uid;
+}
+
+/**
+ * ✅ Some writes happen before auth.currentUser is ready.
+ * We keep local-first behavior, but auto-flush the queue shortly after.
+ */
+const pendingQueueFlush = new Map<string, ReturnType<typeof setTimeout>>();
+
+/**
+ * ✅ If auth wasn't ready at the timer moment, we attach a one-time auth listener.
+ * This ensures queued ops are flushed as soon as Firebase restores auth session.
+ */
+const authReadyFlushUnsubs = new Map<string, () => void>();
+
+function ensureFlushOnAuthReady(uid: string) {
+  if (typeof window === "undefined") return;
+  if (authReadyFlushUnsubs.has(uid)) return;
+
+  const unsub = onAuthStateChanged(auth, async (u) => {
+    if (!u || u.uid !== uid) return;
+
+    const existing = authReadyFlushUnsubs.get(uid);
+    if (existing) {
+      existing();
+      authReadyFlushUnsubs.delete(uid);
+    }
+
+    const userKey = getFirestoreUserKey(uid);
+    if (!userKey) {
+      console.debug("[remindersRepo] authReadyFlush: userKey still not ready", {
+        uid,
+        authUid: auth.currentUser?.uid ?? null,
+      });
+      return;
+    }
+
+    try {
+      const before = safeQueueLen(uid);
+      await syncRemindersQueueToFirestore(uid, userKey);
+      console.debug("[remindersRepo] authReadyFlush: queue flushed", {
+        uid,
+        before,
+        after: safeQueueLen(uid),
+      });
+    } catch (err: unknown) {
+      const e = readErrorInfo(err);
+      console.error("[remindersRepo] authReadyFlush failed:", {
+        uid,
+        code: e.code,
+        message: e.message,
+      });
+    }
+  });
+
+  authReadyFlushUnsubs.set(uid, unsub);
+}
+
+function scheduleQueueFlush(uid: string) {
+  if (typeof window === "undefined") return;
+  if (pendingQueueFlush.has(uid)) return;
+
+  const t = setTimeout(async () => {
+    pendingQueueFlush.delete(uid);
+
+    const userKey = getFirestoreUserKey(uid);
+    if (!userKey) {
+      console.debug("[remindersRepo] delayed flush skipped (auth not ready)", {
+        uid,
+        authUid: auth.currentUser?.uid ?? null,
+        hasAuthUser: !!auth.currentUser,
+        queued: safeQueueLen(uid),
+        mode: getDataMode(),
+      });
+
+      ensureFlushOnAuthReady(uid);
+      return;
+    }
+
+    try {
+      const before = safeQueueLen(uid);
+      await syncRemindersQueueToFirestore(uid, userKey);
+      console.debug("[remindersRepo] queue flushed after delay", {
+        uid,
+        before,
+        after: safeQueueLen(uid),
+      });
+    } catch (err: unknown) {
+      const e = readErrorInfo(err);
+      console.error("[remindersRepo] delayed queue flush failed:", {
+        uid,
+        code: e.code,
+        message: e.message,
+      });
+    }
+  }, 1200);
+
+  pendingQueueFlush.set(uid, t);
 }
 
 /**
@@ -59,13 +188,10 @@ function normalizeReminder(r: Reminder): Reminder {
       : null;
 
   const dueDate =
-    typeof r.dueDate === "string" && r.dueDate.trim().length > 0
-      ? r.dueDate
-      : now;
+    typeof r.dueDate === "string" && r.dueDate.trim().length > 0 ? r.dueDate : now;
 
   const nextTriggerDate =
-    typeof r.nextTriggerDate === "string" &&
-    r.nextTriggerDate.trim().length > 0
+    typeof r.nextTriggerDate === "string" && r.nextTriggerDate.trim().length > 0
       ? r.nextTriggerDate
       : dueDate;
 
@@ -133,7 +259,6 @@ function applyAuditFields(r: Reminder, isEdit: boolean): Reminder {
 export async function repoFetchReminders(uid?: string): Promise<Reminder[]> {
   const mode = getDataMode();
 
-  // ✅ migrate guest -> user
   if (uid) {
     try {
       migrateGuestRemindersToUser(uid);
@@ -143,15 +268,60 @@ export async function repoFetchReminders(uid?: string): Promise<Reminder[]> {
     }
   }
 
-  const local = loadReminders(uid);
+  const local = loadReminders(uid).map(normalizeReminder);
 
-  // ✅ Local mode always returns local
-  if (mode === "local") return local.map(normalizeReminder);
+  if (mode === "local") {
+    console.debug("[remindersRepo] fetch: local mode", {
+      uid,
+      localCount: local.length,
+    });
+    return local;
+  }
 
-  // ✅ Firestore mode or auto mode:
-  // currently we still return local because reminders Firestore is not wired yet.
-  // But we keep queue so future sync works seamlessly.
-  return local.map(normalizeReminder);
+  const userKey = getFirestoreUserKey(uid);
+  if (!userKey) {
+    if (uid) ensureFlushOnAuthReady(uid);
+
+    console.debug("[remindersRepo] fetch: firestore skipped (no userKey)", {
+      uid,
+      authUid: auth.currentUser?.uid ?? null,
+      hasAuthUser: !!auth.currentUser,
+      localCount: local.length,
+      queued: uid ? safeQueueLen(uid) : 0,
+      mode,
+    });
+
+    return local;
+  }
+
+  // at this point uid must exist (because userKey exists)
+  const safeUid = uid ?? userKey;
+
+  try {
+    await syncRemindersQueueToFirestore(safeUid, userKey);
+    await syncLocalRemindersToFirestore(userKey, local);
+
+    const remote = (await fetchUserReminders(userKey)).map(normalizeReminder);
+    saveReminders(uid, remote);
+
+    console.debug("[remindersRepo] fetch: firestore ok", {
+      uid: userKey,
+      remoteCount: remote.length,
+      localCount: local.length,
+    });
+
+    return remote;
+  } catch (err: unknown) {
+    const e = readErrorInfo(err);
+    console.error("repoFetchReminders failed:", {
+      uid,
+      authUid: auth.currentUser?.uid ?? null,
+      code: e.code,
+      message: e.message,
+    });
+
+    return loadReminders(uid).map(normalizeReminder);
+  }
 }
 
 /**
@@ -164,7 +334,6 @@ export async function repoUpsertReminder(
   const mode = getDataMode();
 
   const list = loadReminders(uid);
-
   const exists = list.some((x) => x.id === reminder.id);
   const withAudit = applyAuditFields(reminder, exists);
 
@@ -174,12 +343,58 @@ export async function repoUpsertReminder(
 
   saveReminders(uid, list);
 
-  if (mode === "local") return withAudit;
+  if (mode === "local") {
+    console.debug("[remindersRepo] upsert: local mode", {
+      uid,
+      id: withAudit.id,
+      listCount: list.length,
+    });
+    return withAudit;
+  }
 
-  // ✅ if user is logged in, queue it (future Firestore sync)
-  if (uid) enqueueReminderUpsert(uid, withAudit);
+  const userKey = getFirestoreUserKey(uid);
 
-  return withAudit;
+  if (!userKey) {
+    if (uid) {
+      enqueueReminderUpsert(uid, withAudit);
+      scheduleQueueFlush(uid);
+      ensureFlushOnAuthReady(uid);
+
+      console.debug("[remindersRepo] queued upsert (auth not ready)", {
+        uid,
+        authUid: auth.currentUser?.uid ?? null,
+        mode,
+        hasAuthUser: !!auth.currentUser,
+        queued: safeQueueLen(uid),
+      });
+    }
+    return withAudit;
+  }
+
+  try {
+    await createOrReplaceReminder(userKey, withAudit);
+    console.debug("[remindersRepo] firestore upsert ok", {
+      uid: userKey,
+      id: withAudit.id,
+    });
+    return withAudit;
+  } catch (err: unknown) {
+    const e = readErrorInfo(err);
+    console.error("repoUpsertReminder failed:", {
+      uid,
+      authUid: auth.currentUser?.uid ?? null,
+      code: e.code,
+      message: e.message,
+    });
+
+    if (uid) {
+      enqueueReminderUpsert(uid, withAudit);
+      scheduleQueueFlush(uid);
+      ensureFlushOnAuthReady(uid);
+    }
+
+    return withAudit;
+  }
 }
 
 /**
@@ -194,11 +409,9 @@ export async function repoDeleteReminder(
   const list = loadReminders(uid);
   const target = list.find((r) => r.id === id) ?? null;
 
-  // remove from reminders list
   const updated = list.filter((r) => r.id !== id);
   saveReminders(uid, updated);
 
-  // add to deleted reminder history (local only)
   if (target) {
     const deleted = loadDeletedReminders(uid);
     saveDeletedReminders(uid, [
@@ -207,24 +420,142 @@ export async function repoDeleteReminder(
     ]);
   }
 
-  if (mode === "local") return id;
+  if (mode === "local") {
+    console.debug("[remindersRepo] delete: local mode", { uid, id });
+    return id;
+  }
 
-  if (uid) enqueueReminderDelete(uid, id);
+  const userKey = getFirestoreUserKey(uid);
 
-  return id;
+  if (!userKey) {
+    if (uid) {
+      enqueueReminderDelete(uid, id);
+      scheduleQueueFlush(uid);
+      ensureFlushOnAuthReady(uid);
+
+      console.debug("[remindersRepo] queued delete (auth not ready)", {
+        uid,
+        authUid: auth.currentUser?.uid ?? null,
+        mode,
+        hasAuthUser: !!auth.currentUser,
+        queued: safeQueueLen(uid),
+      });
+    }
+    return id;
+  }
+
+  try {
+    if (target) {
+      await writeDeletedReminder(userKey, {
+        ...target,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    await deleteReminderById(userKey, id);
+    console.debug("[remindersRepo] firestore delete ok", { uid: userKey, id });
+    return id;
+  } catch (err: unknown) {
+    const e = readErrorInfo(err);
+    console.error("repoDeleteReminder failed:", {
+      uid,
+      authUid: auth.currentUser?.uid ?? null,
+      code: e.code,
+      message: e.message,
+    });
+
+    if (uid) {
+      enqueueReminderDelete(uid, id);
+      scheduleQueueFlush(uid);
+      ensureFlushOnAuthReady(uid);
+    }
+
+    return id;
+  }
 }
 
-/* ---------------- Internal helpers for future sync ---------------- */
+/* ---------------- internal sync helpers ---------------- */
 
-/**
- * ✅ We keep this ready — later when we create Firestore reminders collection,
- * this will work just like txSyncQueueToFirestore().
- */
-export async function syncRemindersQueueForUser(uid: string) {
-  const q = readRemindersQueue(uid);
-  if (q.length === 0) return;
+type QueueUpsert = { kind: "upsert"; reminder: Reminder };
+type QueueDelete = { kind: "delete"; id: string };
+type QueueItem = QueueUpsert | QueueDelete;
 
-  // ✅ Currently no remote integration.
-  // This just clears the queue safely.
+function isQueueItem(x: unknown): x is QueueItem {
+  if (typeof x !== "object" || x === null) return false;
+  const obj = x as Record<string, unknown>;
+
+  if (obj.kind === "upsert") {
+    return typeof obj.reminder === "object" && obj.reminder !== null;
+  }
+
+  if (obj.kind === "delete") {
+    return typeof obj.id === "string" && obj.id.trim().length > 0;
+  }
+
+  return false;
+}
+
+function safeQueueLen(uid: string): number {
+  try {
+    const raw: unknown = readRemindersQueue(uid);
+    return Array.isArray(raw) ? raw.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function syncRemindersQueueToFirestore(uid: string, userKey: string) {
+  const raw: unknown = readRemindersQueue(uid);
+  const arr = Array.isArray(raw) ? raw : [];
+  const items = arr.filter(isQueueItem);
+
+  if (items.length === 0) {
+    if (arr.length > 0) {
+      console.debug("[remindersRepo] queue invalid/empty -> clearing", {
+        uid,
+        rawLen: arr.length,
+      });
+      clearRemindersQueue(uid);
+    }
+    return;
+  }
+
+  console.debug("[remindersRepo] flushing queue", {
+    uid,
+    userKey,
+    items: items.length,
+  });
+
+  for (const item of items) {
+    if (item.kind === "upsert") {
+      await createOrReplaceReminder(userKey, normalizeReminder(item.reminder));
+    } else {
+      await deleteReminderById(userKey, item.id);
+    }
+  }
+
   clearRemindersQueue(uid);
+}
+
+async function syncLocalRemindersToFirestore(userKey: string, local: Reminder[]) {
+  if (local.length === 0) return;
+
+  const remote = await fetchUserReminders(userKey);
+  const remoteIds = new Set(remote.map((r) => r.id));
+
+  let pushed = 0;
+
+  for (const r of local) {
+    if (!remoteIds.has(r.id)) {
+      await createOrReplaceReminder(userKey, normalizeReminder(r));
+      pushed += 1;
+    }
+  }
+
+  if (pushed > 0) {
+    console.debug("[remindersRepo] backfill local->firestore pushed", {
+      uid: userKey,
+      pushed,
+    });
+  }
 }

@@ -5,6 +5,7 @@ import type {
   Borrowing,
   BorrowingPayment,
 } from "@/store/features/borrowings/borrowingSlice";
+
 import {
   collection,
   deleteDoc,
@@ -15,46 +16,72 @@ import {
   setDoc,
 } from "firebase/firestore";
 
-function borrowingsCol(userKey: string) {
-  return collection(db, "users", userKey, "borrowings");
+/**
+ * ✅ UID-based Firestore path (STRICT):
+ * users/{uid}/borrowings/{id}
+ * users/{uid}/deletedBorrowings/{id}
+ */
+function borrowingsCol(uid: string) {
+  return collection(db, "users", uid, "borrowings");
 }
 
-function deletedBorrowingsCol(userKey: string) {
-  return collection(db, "users", userKey, "deletedBorrowings");
+function deletedBorrowingsCol(uid: string) {
+  return collection(db, "users", uid, "deletedBorrowings");
 }
 
-type FirestoreBorrowData =
-  Partial<Record<keyof Borrowing, unknown>> & Record<string, unknown>;
+/* ---------------- safe helpers ---------------- */
+
+type AnyRecord = Record<string, unknown>;
+
+function asRecord(value: unknown): AnyRecord {
+  if (value && typeof value === "object") return value as AnyRecord;
+  return {};
+}
+
+function isNonEmptyString(v: unknown): v is string {
+  return typeof v === "string" && v.trim().length > 0;
+}
+
+function isString(v: unknown): v is string {
+  return typeof v === "string";
+}
+
+function isStringOrNull(v: unknown): v is string | null {
+  return typeof v === "string" || v === null;
+}
+
+function isFiniteNumber(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v);
+}
 
 function normalizePayments(raw: unknown): BorrowingPayment[] {
   if (!Array.isArray(raw)) return [];
 
-  return raw
-    .map((p) => {
-      const x = p as Partial<{ amount: unknown; date: unknown }>;
-      const amt =
-        typeof x.amount === "number" && Number.isFinite(x.amount) ? x.amount : 0;
-      const date =
-        typeof x.date === "string" && x.date.trim().length > 0 ? x.date : "";
-      if (!date || amt <= 0) return null;
-      return { amount: amt, date };
-    })
-    .filter(Boolean) as BorrowingPayment[];
+  const out: BorrowingPayment[] = [];
+
+  for (const p of raw) {
+    const rec = asRecord(p);
+
+    const amt = isFiniteNumber(rec.amount) ? rec.amount : 0;
+    const date = isNonEmptyString(rec.date) ? rec.date : "";
+
+    if (!date || amt <= 0) continue;
+
+    out.push({ amount: amt, date });
+  }
+
+  return out;
 }
 
 function normalizeBorrowing(id: string, data: unknown): Borrowing {
   const now = new Date().toISOString();
-  const d = (data ?? {}) as FirestoreBorrowData;
+  const d = asRecord(data);
 
-  const person = typeof d.person === "string" ? d.person : "";
+  const person = isString(d.person) ? d.person : "";
 
-  const amount =
-    typeof d.amount === "number" && Number.isFinite(d.amount) ? d.amount : 0;
+  const amount = isFiniteNumber(d.amount) ? d.amount : 0;
 
-  const amountPaid =
-    typeof d.amountPaid === "number" && Number.isFinite(d.amountPaid)
-      ? d.amountPaid
-      : 0;
+  const amountPaid = isFiniteNumber(d.amountPaid) ? d.amountPaid : 0;
 
   const payments = normalizePayments(d.payments);
 
@@ -67,42 +94,25 @@ function normalizeBorrowing(id: string, data: unknown): Borrowing {
       ? d.category
       : "friend";
 
-  const dueDate = typeof d.dueDate === "string" ? d.dueDate : "";
+  const dueDate = isString(d.dueDate) ? d.dueDate : "";
 
-  const note =
-    typeof d.note === "string" && d.note.trim().length > 0 ? d.note : undefined;
+  const note = isNonEmptyString(d.note) ? d.note : undefined;
 
-  const status =
-    d.status === "paid" || d.status === "pending" ? d.status : "pending";
+  const status = d.status === "paid" || d.status === "pending" ? d.status : "pending";
 
-  const createdAt =
-    typeof d.createdAt === "string" && d.createdAt.trim().length > 0
-      ? d.createdAt
-      : now;
+  const createdAt = isNonEmptyString(d.createdAt) ? d.createdAt : now;
 
-  const updatedAt =
-    typeof d.updatedAt === "string" && d.updatedAt.trim().length > 0
-      ? d.updatedAt
-      : null;
+  const updatedAt = isNonEmptyString(d.updatedAt) ? d.updatedAt : null;
 
-  const paidAt =
-    typeof d.paidAt === "string" && d.paidAt.trim().length > 0 ? d.paidAt : null;
+  const paidAt = isNonEmptyString(d.paidAt) ? d.paidAt : null;
 
-  const createdByUid =
-    typeof d.createdByUid === "string" ? d.createdByUid : undefined;
+  const createdByUid = isString(d.createdByUid) ? d.createdByUid : undefined;
 
-  const createdByEmail =
-    typeof d.createdByEmail === "string" || d.createdByEmail === null
-      ? (d.createdByEmail as string | null)
-      : undefined;
+  const createdByEmail = isStringOrNull(d.createdByEmail) ? d.createdByEmail : undefined;
 
-  const updatedByUid =
-    typeof d.updatedByUid === "string" ? d.updatedByUid : undefined;
+  const updatedByUid = isString(d.updatedByUid) ? d.updatedByUid : undefined;
 
-  const updatedByEmail =
-    typeof d.updatedByEmail === "string" || d.updatedByEmail === null
-      ? (d.updatedByEmail as string | null)
-      : undefined;
+  const updatedByEmail = isStringOrNull(d.updatedByEmail) ? d.updatedByEmail : undefined;
 
   return {
     id,
@@ -125,8 +135,8 @@ function normalizeBorrowing(id: string, data: unknown): Borrowing {
   };
 }
 
-export async function fetchUserBorrowings(userKey: string): Promise<Borrowing[]> {
-  const q = query(borrowingsCol(userKey), orderBy("createdAt", "desc"));
+export async function fetchUserBorrowings(uid: string): Promise<Borrowing[]> {
+  const q = query(borrowingsCol(uid), orderBy("createdAt", "desc"));
   const snap = await getDocs(q);
 
   const list: Borrowing[] = [];
@@ -137,10 +147,8 @@ export async function fetchUserBorrowings(userKey: string): Promise<Borrowing[]>
   return list;
 }
 
-export async function fetchUserDeletedBorrowings(
-  userKey: string
-): Promise<Borrowing[]> {
-  const q = query(deletedBorrowingsCol(userKey), orderBy("createdAt", "desc"));
+export async function fetchUserDeletedBorrowings(uid: string): Promise<Borrowing[]> {
+  const q = query(deletedBorrowingsCol(uid), orderBy("createdAt", "desc"));
   const snap = await getDocs(q);
 
   const list: Borrowing[] = [];
@@ -151,8 +159,8 @@ export async function fetchUserDeletedBorrowings(
   return list;
 }
 
-export async function createOrReplaceBorrowing(userKey: string, b: Borrowing) {
-  const ref = doc(db, "users", userKey, "borrowings", b.id);
+export async function createOrReplaceBorrowing(uid: string, b: Borrowing): Promise<void> {
+  const ref = doc(db, "users", uid, "borrowings", b.id);
 
   await setDoc(
     ref,
@@ -184,10 +192,10 @@ export async function createOrReplaceBorrowing(userKey: string, b: Borrowing) {
 }
 
 export async function createOrReplaceDeletedBorrowing(
-  userKey: string,
+  uid: string,
   b: Borrowing
-) {
-  const ref = doc(db, "users", userKey, "deletedBorrowings", b.id);
+): Promise<void> {
+  const ref = doc(db, "users", uid, "deletedBorrowings", b.id);
 
   await setDoc(
     ref,
@@ -220,18 +228,21 @@ export async function createOrReplaceDeletedBorrowing(
   );
 }
 
-export async function deleteBorrowingById(userKey: string, id: string) {
-  const ref = doc(db, "users", userKey, "borrowings", id);
+export async function deleteBorrowingById(uid: string, id: string): Promise<void> {
+  const ref = doc(db, "users", uid, "borrowings", id);
   await deleteDoc(ref);
 }
 
-export async function deleteDeletedBorrowingById(userKey: string, id: string) {
-  const ref = doc(db, "users", userKey, "deletedBorrowings", id);
+export async function deleteDeletedBorrowingById(
+  uid: string,
+  id: string
+): Promise<void> {
+  const ref = doc(db, "users", uid, "deletedBorrowings", id);
   await deleteDoc(ref);
 }
 
-export async function deleteAllDeletedBorrowings(userKey: string) {
-  const snap = await getDocs(deletedBorrowingsCol(userKey));
+export async function deleteAllDeletedBorrowings(uid: string): Promise<void> {
+  const snap = await getDocs(deletedBorrowingsCol(uid));
   const deletes: Promise<void>[] = [];
 
   snap.forEach((d) => {

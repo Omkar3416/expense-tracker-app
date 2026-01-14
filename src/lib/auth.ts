@@ -39,7 +39,7 @@ import {
 /**
  * ✅ Secure Remember-me persistence
  */
-async function applyPersistence(remember: boolean) {
+async function applyPersistence(remember: boolean): Promise<void> {
   try {
     await setPersistence(
       auth,
@@ -47,6 +47,36 @@ async function applyPersistence(remember: boolean) {
     );
   } catch {
     // ignore
+  }
+}
+
+/**
+ * ✅ Friendly, explicit error when Firebase blocks the continue URL.
+ * This is the #1 reason verification/reset emails don't send.
+ */
+function maybeThrowUnauthorizedContinueUrl(e: unknown): void {
+  const code = getFirebaseErrorCode(e) ?? "";
+  const msg = e instanceof Error ? e.message : "";
+
+  const combined = `${code} ${msg}`.toLowerCase();
+
+  if (
+    combined.includes("auth/unauthorized-continue-uri") ||
+    combined.includes("unauthorized-continue-uri") ||
+    combined.includes("domain not allowlisted")
+  ) {
+    throw new Error(
+      [
+        "❌ Email action link is blocked by Firebase (unauthorized continue URL).",
+        "",
+        "Fix:",
+        "1) Firebase Console → Authentication → Settings → Authorized domains",
+        "   - Add localhost (and your deployed domain).",
+        "2) Ensure NEXT_PUBLIC_APP_URL matches an authorized domain.",
+        "",
+        "After that, verification/reset emails will send normally.",
+      ].join("\n")
+    );
   }
 }
 
@@ -67,7 +97,11 @@ export async function getEmailSignInMethods(email: string): Promise<string[]> {
 /* ------------------------------------------------------------------ */
 /* ✅ Email / Password Login/Register                                 */
 /* ------------------------------------------------------------------ */
-export async function login(email: string, password: string, remember: boolean) {
+export async function login(
+  email: string,
+  password: string,
+  remember: boolean
+): Promise<User> {
   await applyPersistence(remember);
 
   const res = await signInWithEmailAndPassword(auth, email.trim(), password);
@@ -86,17 +120,23 @@ export async function register(
   email: string,
   password: string,
   remember: boolean
-) {
+): Promise<User> {
   await applyPersistence(remember);
 
   const res = await createUserWithEmailAndPassword(auth, email.trim(), password);
 
-  await sendVerifyEmail(res.user);
+  try {
+    await sendVerifyEmail(res.user);
+  } catch (e: unknown) {
+    // ✅ Surface the real root-cause when Firebase blocks the action URL.
+    maybeThrowUnauthorizedContinueUrl(e);
+    throw e;
+  }
 
-  await new Promise((r) => setTimeout(r, 300));
+  // Small delay so that verification email dispatch isn't interrupted in edge cases
+  await new Promise<void>((r) => setTimeout(r, 300));
 
   await signOut(auth);
-
   return res.user;
 }
 
@@ -211,10 +251,16 @@ export async function loginWithGoogleAdminOnly(
 export async function sendResetPasswordEmail(email: string): Promise<boolean> {
   const url = getActionUrlForEmails();
 
-  await sendPasswordResetEmail(auth, email.trim(), {
-    url,
-    handleCodeInApp: true,
-  });
+  try {
+    await sendPasswordResetEmail(auth, email.trim(), {
+      url,
+      handleCodeInApp: true,
+    });
+  } catch (e: unknown) {
+    // ✅ Same underlying issue can block reset emails too.
+    maybeThrowUnauthorizedContinueUrl(e);
+    throw e;
+  }
 
   return true;
 }
@@ -236,9 +282,14 @@ export async function resendVerificationEmail(
     throw new Error("✅ Your email is already verified. Please login normally.");
   }
 
-  await sendVerifyEmail(res.user);
-  await signOut(auth);
+  try {
+    await sendVerifyEmail(res.user);
+  } catch (e: unknown) {
+    maybeThrowUnauthorizedContinueUrl(e);
+    throw e;
+  }
 
+  await signOut(auth);
   return true;
 }
 
@@ -248,7 +299,9 @@ export async function resendVerificationEmail(
 export async function logout(): Promise<void> {
   try {
     setAdminUiEnabled(false);
-  } catch {}
+  } catch {
+    // ignore
+  }
 
   await signOut(auth);
 }
@@ -256,7 +309,13 @@ export async function logout(): Promise<void> {
 /* ------------------------------------------------------------------ */
 /* ✅ Role (Admin Claim Check)                                        */
 /* ------------------------------------------------------------------ */
-export async function getRole() {
+export type RoleInfo = {
+  isAdmin: boolean;
+  uid: string | null;
+  email: string | null;
+};
+
+export async function getRole(): Promise<RoleInfo> {
   const user = auth.currentUser;
   if (!user) return { isAdmin: false, uid: null, email: null };
 
@@ -264,10 +323,12 @@ export async function getRole() {
     const result = await getIdTokenResult(user);
     const isAdmin = Boolean(result.claims.admin);
 
-    return { isAdmin, uid: user.uid, email: user.email };
+    return { isAdmin, uid: user.uid, email: user.email ?? null };
   } catch (err: unknown) {
+    // keep prior behavior: do not crash app
+    // eslint-disable-next-line no-console
     console.error("getRole failed:", err);
-    return { isAdmin: false, uid: user.uid, email: user.email };
+    return { isAdmin: false, uid: user.uid, email: user.email ?? null };
   }
 }
 

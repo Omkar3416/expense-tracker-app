@@ -57,20 +57,53 @@ function extractErrorCode(errObj: unknown): string {
   return typeof code === "string" ? code : String(code ?? "");
 }
 
+function safeJsonParseBody(raw: string): Body | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (parsed && typeof parsed === "object") return parsed as Body;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export async function POST(req: Request) {
   try {
     const decoded = await verifyUser(req);
 
-    const body = (await req.json()) as Body;
-    const token = typeof body.token === "string" ? body.token.trim() : "";
+    // ✅ SAFETY: avoid req.json() crash when body is empty or invalid JSON
+    // Note: Request body can only be read ONCE, so we use req.text() here.
+    const rawBody = await req.text();
+    const body = safeJsonParseBody(rawBody);
 
+    if (!body) {
+      errServer("❌ Invalid/empty JSON body", {
+        contentType: req.headers.get("content-type"),
+        rawLen: rawBody.length,
+      });
+
+      return NextResponse.json(
+        { error: "Invalid JSON body. Send { token: string }." },
+        { status: 400 }
+      );
+    }
+
+    const token = typeof body.token === "string" ? body.token.trim() : "";
     if (!token) {
       return NextResponse.json({ error: "token is required." }, { status: 400 });
     }
 
     const uid = decoded.uid;
-    const email = decoded.email ?? null;
-    const isAdmin = Boolean(decoded.admin);
+
+    // ✅ email is stored only as metadata field (NOT used as doc id)
+    const email: string | null =
+      typeof decoded.email === "string" ? decoded.email : null;
+
+    // ✅ custom claim "admin" (boolean) if present
+    const isAdmin = (decoded as { admin?: unknown }).admin === true;
 
     const topics: string[] = [
       "announcements_prod",
@@ -111,6 +144,7 @@ export async function POST(req: Request) {
           resp,
         });
 
+        // If token is invalid, clean it up from Firestore
         if (code && isInvalidTokenErrorCode(code)) {
           logServer("🧹 Invalid token detected → deleting from Firestore:", token);
 
@@ -130,7 +164,7 @@ export async function POST(req: Request) {
       }
     }
 
-    // ✅ Save token + topics (UID doc key stays UID)
+    // ✅ Save token + topics (Firestore user document key remains UID)
     const userRef = adminDb.collection("users").doc(uid);
     const tokenRef = userRef.collection("fcmTokens").doc(token);
 
@@ -178,7 +212,6 @@ export async function POST(req: Request) {
     });
 
     logServer("✅ Sync success:", { uid, topics });
-
     return NextResponse.json({ success: true, topics });
   } catch (err: unknown) {
     errServer("❌ Error:", err);

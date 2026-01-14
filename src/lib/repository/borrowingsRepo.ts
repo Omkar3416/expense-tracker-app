@@ -24,14 +24,10 @@ import {
 
 import { auth } from "@/lib/firebaseClient";
 
-function normalizeEmail(email: string) {
-  return email.trim().toLowerCase();
-}
-
 /**
- * ✅ Email-only Firestore key rule:
- * - We ONLY use email as Firestore user document ID
- * - No fallback to UID (because you want email-based structure)
+ * ✅ UID-only Firestore key rule (matches Firestore rules):
+ * - UID must exist
+ * - must match current authenticated user uid
  */
 function getFirestoreUserKey(uid?: string): string | null {
   if (!uid) return null;
@@ -39,19 +35,36 @@ function getFirestoreUserKey(uid?: string): string | null {
   const u = auth.currentUser;
   if (!u) return null;
 
-  // ✅ must match auth uid
   if (u.uid !== uid) return null;
 
-  // ✅ app policy: require verified email
-  if (u.emailVerified === false) return null;
+  return uid;
+}
 
-  const email = u.email;
-  if (typeof email === "string" && email.trim().length > 0) {
-    return normalizeEmail(email);
-  }
+/**
+ * Some writes happen before auth.currentUser is ready.
+ * Keep local-first behavior, but auto-flush the queue shortly after.
+ */
+const pendingQueueFlush = new Map<string, ReturnType<typeof setTimeout>>();
 
-  // ❌ NO UID fallback (your strict requirement)
-  return null;
+function scheduleQueueFlush(uid: string) {
+  if (typeof window === "undefined") return;
+  if (pendingQueueFlush.has(uid)) return;
+
+  const t = setTimeout(async () => {
+    pendingQueueFlush.delete(uid);
+
+    const userKey = getFirestoreUserKey(uid);
+    if (!userKey) return;
+
+    try {
+      await syncBorrowQueueToFirestore(uid, userKey);
+      console.debug("[borrowingsRepo] queue flushed after delay", { uid });
+    } catch (err) {
+      console.error("[borrowingsRepo] delayed queue flush failed:", err);
+    }
+  }, 1200);
+
+  pendingQueueFlush.set(uid, t);
 }
 
 function getEditorIdentity() {
@@ -157,18 +170,31 @@ export async function repoUpsertBorrowing(
 
   const userKey = getFirestoreUserKey(uid);
 
-  // ✅ if Firestore unavailable => queue for later
+  // ✅ Firestore unavailable => queue for later (and auto-flush)
   if (!userKey) {
-    if (uid) enqueueBorrowUpsert(uid, withAudit);
+    if (uid) {
+      enqueueBorrowUpsert(uid, withAudit);
+      scheduleQueueFlush(uid);
+      console.debug("[borrowingsRepo] queued upsert (auth not ready)", {
+        uid,
+        mode,
+        hasAuthUser: !!auth.currentUser,
+      });
+    }
     return withAudit;
   }
 
   try {
     await createOrReplaceBorrowing(userKey, withAudit);
+    console.debug("[borrowingsRepo] firestore upsert ok", {
+      uid: userKey,
+      id: withAudit.id,
+    });
     return withAudit;
   } catch (err) {
     console.error("repoUpsertBorrowing failed:", err);
     enqueueBorrowUpsert(uid!, withAudit);
+    scheduleQueueFlush(uid!);
     return withAudit;
   }
 }
@@ -184,17 +210,28 @@ export async function repoDeleteBorrowing(uid: string | undefined, id: string) {
 
   const userKey = getFirestoreUserKey(uid);
 
+  // ✅ Firestore unavailable => queue for later (and auto-flush)
   if (!userKey) {
-    if (uid) enqueueBorrowDelete(uid, id);
+    if (uid) {
+      enqueueBorrowDelete(uid, id);
+      scheduleQueueFlush(uid);
+      console.debug("[borrowingsRepo] queued delete (auth not ready)", {
+        uid,
+        mode,
+        hasAuthUser: !!auth.currentUser,
+      });
+    }
     return id;
   }
 
   try {
     await deleteBorrowingById(userKey, id);
+    console.debug("[borrowingsRepo] firestore delete ok", { uid: userKey, id });
     return id;
   } catch (err) {
     console.error("repoDeleteBorrowing failed:", err);
     enqueueBorrowDelete(uid!, id);
+    scheduleQueueFlush(uid!);
     return id;
   }
 }
@@ -216,10 +253,7 @@ async function syncBorrowQueueToFirestore(uid: string, userKey: string) {
   clearBorrowQueue(uid);
 }
 
-async function syncLocalBorrowingsToFirestore(
-  userKey: string,
-  local: Borrowing[]
-) {
+async function syncLocalBorrowingsToFirestore(userKey: string, local: Borrowing[]) {
   if (local.length === 0) return;
 
   const remote = await fetchUserBorrowings(userKey);

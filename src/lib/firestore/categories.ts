@@ -14,11 +14,14 @@ import {
 } from "firebase/firestore";
 
 /**
- * ✅ userKey = emailLowercase
- * Example: "demo@gmail.com"
+ * ✅ Firestore user key rule (STRICT):
+ * - ALWAYS use UID as the user document key
+ *
+ * Path:
+ * users/{uid}/categories/{id}
  */
-function categoriesCol(userKey: string) {
-  return collection(db, "users", userKey, "categories");
+function categoriesCol(uid: string) {
+  return collection(db, "users", uid, "categories");
 }
 
 type FirestoreCategoryData = Partial<Record<keyof Category, unknown>> &
@@ -86,8 +89,8 @@ function normalizeCategory(id: string, data: unknown): Category {
   };
 }
 
-export async function fetchUserCategories(userKey: string): Promise<Category[]> {
-  const q = query(categoriesCol(userKey), orderBy("createdAt", "desc"));
+export async function fetchUserCategories(uid: string): Promise<Category[]> {
+  const q = query(categoriesCol(uid), orderBy("createdAt", "desc"));
   const snap = await getDocs(q);
 
   const list: Category[] = [];
@@ -98,8 +101,8 @@ export async function fetchUserCategories(userKey: string): Promise<Category[]> 
   return list;
 }
 
-export async function createOrReplaceCategory(userKey: string, c: Category) {
-  const ref = doc(db, "users", userKey, "categories", c.id);
+export async function createOrReplaceCategory(uid: string, c: Category) {
+  const ref = doc(db, "users", uid, "categories", c.id);
 
   await setDoc(
     ref,
@@ -123,7 +126,7 @@ export async function createOrReplaceCategory(userKey: string, c: Category) {
   );
 }
 
-export async function deleteCategoryById(userKey: string, id: string) {
-  const ref = doc(db, "users", userKey, "categories", id);
+export async function deleteCategoryById(uid: string, id: string) {
+  const ref = doc(db, "users", uid, "categories", id);
   await deleteDoc(ref);
 }
