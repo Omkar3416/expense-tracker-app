@@ -1,7 +1,7 @@
 // src/components/admin/AnnouncementsCard.tsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { auth, db } from "@/lib/firebaseClient";
 
 import {
@@ -134,6 +134,40 @@ export default function AnnouncementsCard() {
   const [editTitle, setEditTitle] = useState<string>("");
   const [editBody, setEditBody] = useState<string>("");
 
+  // ✅ NEW: Multi-select for bulk actions
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  function toggleSelected(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function clearSelection() {
+    setSelectedIds(new Set());
+  }
+
+  function isSelected(id: string) {
+    return selectedIds.has(id);
+  }
+
+  const selectedCount = selectedIds.size;
+
+  const selectedRows = useMemo(() => {
+    if (selectedIds.size === 0) return [];
+    const map = new Map(annRows.map((r) => [r.id, r]));
+    return Array.from(selectedIds)
+      .map((id) => map.get(id) ?? null)
+      .filter((x): x is AnnouncementRow => x !== null);
+  }, [annRows, selectedIds]);
+
+  const selectedDeletedOnlyCount = useMemo(() => {
+    return selectedRows.filter((r) => r.status === "deleted").length;
+  }, [selectedRows]);
+
   // ✅ DEV mode restriction: dev notifications should only be sent to ALL admins (topic)
   // so we force target to "all"
   useEffect(() => {
@@ -154,6 +188,9 @@ export default function AnnouncementsCard() {
 
       const rows: AnnouncementRow[] = snap.docs.map(parseAnnouncement);
       setAnnRows(rows);
+
+      // ✅ NEW: clear selection on reload so UI never desyncs
+      clearSelection();
     } catch (e: unknown) {
       const msg =
         e instanceof Error ? e.message : "Failed to load announcements.";
@@ -345,6 +382,222 @@ export default function AnnouncementsCard() {
     }
   }
 
+  // ✅ NEW: Permanent delete (Admin-only API)
+  async function permanentDeleteAnnouncement(id: string) {
+    const ok = confirm(
+      "PERMANENT DELETE?\nThis will remove the announcement from Firestore completely.\nSoft delete history will stay in users, but the announcement will no longer exist."
+    );
+    if (!ok) return;
+
+    setAnnErr(null);
+
+    const user = auth.currentUser;
+    if (!user) {
+      setAnnErr("❌ Not logged in.");
+      return;
+    }
+
+    try {
+      const token = await user.getIdToken(true);
+
+      const res = await fetch(`/api/admin/announcements/${id}`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      const data = await safeReadJson(res);
+
+      if (!res.ok) {
+        setAnnErr(data.error ?? "❌ Failed to permanently delete.");
+        return;
+      }
+
+      await loadAnnouncements();
+    } catch (e: unknown) {
+      const msg =
+        e instanceof Error ? e.message : "❌ Failed to permanently delete.";
+      setAnnErr(msg);
+    }
+  }
+
+  // ✅ NEW: Soft delete selected (bulk)
+  async function deleteSelectedAnnouncements() {
+    if (selectedIds.size === 0) {
+      setAnnErr("⚠️ No announcements selected.");
+      return;
+    }
+
+    const ok = confirm(
+      `Delete selected announcements? (${selectedIds.size})\n(This is SOFT delete: keeps history in users)`
+    );
+    if (!ok) return;
+
+    setAnnErr(null);
+
+    try {
+      const user = auth.currentUser;
+      const email = user?.email ? normalizeEmail(user.email) : "unknown";
+
+      for (const id of Array.from(selectedIds)) {
+        const ref = doc(db, "announcements", id);
+        await updateDoc(ref, {
+          status: "deleted",
+          deletedAt: serverTimestamp(),
+          deletedBy: email,
+        });
+      }
+
+      await loadAnnouncements();
+    } catch (e: unknown) {
+      const msg =
+        e instanceof Error ? e.message : "❌ Failed to delete selected.";
+      setAnnErr(msg);
+    }
+  }
+
+  // ✅ NEW: Soft delete ALL currently loaded (bulk)
+  async function deleteAllAnnouncements() {
+    if (annRows.length === 0) {
+      setAnnErr("⚠️ No announcements to delete.");
+      return;
+    }
+
+    const ok = confirm(
+      `Delete ALL announcements shown here? (${annRows.length})\n(This is SOFT delete: keeps history in users)`
+    );
+    if (!ok) return;
+
+    setAnnErr(null);
+
+    try {
+      const user = auth.currentUser;
+      const email = user?.email ? normalizeEmail(user.email) : "unknown";
+
+      for (const row of annRows) {
+        const ref = doc(db, "announcements", row.id);
+        await updateDoc(ref, {
+          status: "deleted",
+          deletedAt: serverTimestamp(),
+          deletedBy: email,
+        });
+      }
+
+      await loadAnnouncements();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "❌ Failed to delete all.";
+      setAnnErr(msg);
+    }
+  }
+
+  // ✅ NEW: Permanent delete selected (ONLY those already soft deleted)
+  async function permanentDeleteSelectedDeletedOnly() {
+    if (selectedIds.size === 0) {
+      setAnnErr("⚠️ No announcements selected.");
+      return;
+    }
+
+    const toDelete = selectedRows.filter((r) => r.status === "deleted");
+    if (toDelete.length === 0) {
+      setAnnErr(
+        "⚠️ Permanent delete requires soft delete first (status=deleted)."
+      );
+      return;
+    }
+
+    const ok = confirm(
+      `PERMANENT DELETE selected deleted announcements? (${toDelete.length})\nOnly items already soft-deleted will be removed completely.`
+    );
+    if (!ok) return;
+
+    setAnnErr(null);
+
+    const user = auth.currentUser;
+    if (!user) {
+      setAnnErr("❌ Not logged in.");
+      return;
+    }
+
+    try {
+      const token = await user.getIdToken(true);
+
+      for (const row of toDelete) {
+        const res = await fetch(`/api/admin/announcements/${row.id}`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        const data = await safeReadJson(res);
+        if (!res.ok) {
+          setAnnErr(
+            data.error ??
+              `❌ Failed to permanently delete announcement ${row.id}`
+          );
+          return;
+        }
+      }
+
+      await loadAnnouncements();
+    } catch (e: unknown) {
+      const msg =
+        e instanceof Error
+          ? e.message
+          : "❌ Failed to permanently delete selected.";
+      setAnnErr(msg);
+    }
+  }
+
+  // ✅ NEW: Permanent delete ALL deleted ones (ONLY status=deleted)
+  async function permanentDeleteAllDeletedOnly() {
+    const deletedRows = annRows.filter((r) => r.status === "deleted");
+    if (deletedRows.length === 0) {
+      setAnnErr("⚠️ No soft-deleted announcements to permanently delete.");
+      return;
+    }
+
+    const ok = confirm(
+      `PERMANENT DELETE ALL soft-deleted announcements? (${deletedRows.length})\nThis removes them from Firestore completely.`
+    );
+    if (!ok) return;
+
+    setAnnErr(null);
+
+    const user = auth.currentUser;
+    if (!user) {
+      setAnnErr("❌ Not logged in.");
+      return;
+    }
+
+    try {
+      const token = await user.getIdToken(true);
+
+      for (const row of deletedRows) {
+        const res = await fetch(`/api/admin/announcements/${row.id}`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        const data = await safeReadJson(res);
+        if (!res.ok) {
+          setAnnErr(
+            data.error ??
+              `❌ Failed to permanently delete announcement ${row.id}`
+          );
+          return;
+        }
+      }
+
+      await loadAnnouncements();
+    } catch (e: unknown) {
+      const msg =
+        e instanceof Error
+          ? e.message
+          : "❌ Failed to permanently delete all deleted.";
+      setAnnErr(msg);
+    }
+  }
+
   useEffect(() => {
     loadAnnouncements();
   }, []);
@@ -395,9 +648,7 @@ export default function AnnouncementsCard() {
               <label className="text-sm text-white/70">Mode</label>
               <select
                 value={annMode}
-                onChange={(e) =>
-                  setAnnMode(e.target.value as AnnouncementMode)
-                }
+                onChange={(e) => setAnnMode(e.target.value as AnnouncementMode)}
                 className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm outline-none"
                 disabled={annSendLoading}
               >
@@ -484,6 +735,52 @@ export default function AnnouncementsCard() {
             <b>announcements</b>.
           </p>
 
+          {/* ✅ NEW: Bulk actions */}
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              onClick={deleteSelectedAnnouncements}
+              disabled={selectedCount === 0 || annLoading}
+              className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-xs font-semibold hover:bg-rose-500/20 transition disabled:opacity-60"
+            >
+              Delete Selected ({selectedCount})
+            </button>
+
+            <button
+              onClick={deleteAllAnnouncements}
+              disabled={annRows.length === 0 || annLoading}
+              className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-1.5 text-xs font-semibold hover:bg-rose-500/20 transition disabled:opacity-60"
+            >
+              Delete All
+            </button>
+
+            <button
+              onClick={permanentDeleteSelectedDeletedOnly}
+              disabled={selectedDeletedOnlyCount === 0 || annLoading}
+              className="rounded-lg border border-rose-500/40 bg-rose-500/15 px-3 py-1.5 text-xs font-semibold hover:bg-rose-500/25 transition disabled:opacity-60"
+            >
+              Permanent Delete Selected (Deleted Only) (
+              {selectedDeletedOnlyCount})
+            </button>
+
+            <button
+              onClick={permanentDeleteAllDeletedOnly}
+              disabled={
+                annRows.every((r) => r.status !== "deleted") || annLoading
+              }
+              className="rounded-lg border border-rose-500/40 bg-rose-500/15 px-3 py-1.5 text-xs font-semibold hover:bg-rose-500/25 transition disabled:opacity-60"
+            >
+              Permanent Delete All (Deleted Only)
+            </button>
+
+            <button
+              onClick={clearSelection}
+              disabled={selectedCount === 0}
+              className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold hover:bg-white/10 transition disabled:opacity-60"
+            >
+              Clear Selection
+            </button>
+          </div>
+
           <div className="mt-4 space-y-2">
             {annLoading && (
               <p className="text-sm text-white/50">Loading history...</p>
@@ -501,53 +798,65 @@ export default function AnnouncementsCard() {
                   className="rounded-2xl border border-white/10 bg-white/5 p-4"
                 >
                   <div className="flex items-start justify-between gap-3 flex-wrap">
-                    <div>
-                      <p className="text-sm font-semibold text-white/90">
-                        {row.title || "(no title)"}
-                        <span className="ml-2 text-xs text-white/50">
-                          ({row.mode.toUpperCase()} •{" "}
-                          {row.target.toUpperCase()}
-                          {row.target === "user" && row.targetEmail
-                            ? ` • ${row.targetEmail}`
-                            : ""}
-                          )
-                        </span>
-                      </p>
+                    <div className="flex items-start gap-3">
+                      {/* ✅ NEW: selection checkbox */}
+                      <input
+                        type="checkbox"
+                        checked={isSelected(row.id)}
+                        onChange={() => toggleSelected(row.id)}
+                        className="mt-1 h-4 w-4 accent-white"
+                        disabled={isEditing}
+                        aria-label="Select announcement"
+                      />
 
-                      <p className="text-xs text-white/60 mt-1 whitespace-pre-wrap">
-                        {row.body || "(no body)"}
-                      </p>
+                      <div>
+                        <p className="text-sm font-semibold text-white/90">
+                          {row.title || "(no title)"}
+                          <span className="ml-2 text-xs text-white/50">
+                            ({row.mode.toUpperCase()} •{" "}
+                            {row.target.toUpperCase()}
+                            {row.target === "user" && row.targetEmail
+                              ? ` • ${row.targetEmail}`
+                              : ""}
+                            )
+                          </span>
+                        </p>
 
-                      <div className="mt-2 text-[11px] text-white/40 space-y-1">
-                        <div>
-                          Sent:{" "}
-                          <span className="text-white/60">
-                            {formatMaybeTimestamp(row.sentAt)}
-                          </span>
-                        </div>
-                        <div>
-                          Edited:{" "}
-                          <span className="text-white/60">
-                            {formatMaybeTimestamp(row.editedAt)}
-                          </span>
-                        </div>
-                        <div>
-                          Resent:{" "}
-                          <span className="text-white/60">
-                            {formatMaybeTimestamp(row.resentAt)}
-                          </span>
-                        </div>
-                        <div>
-                          Deleted:{" "}
-                          <span className="text-white/60">
-                            {formatMaybeTimestamp(row.deletedAt)}
-                          </span>
-                        </div>
-                        {row.status === "deleted" && (
-                          <div className="text-rose-200/80">
-                            Status: DELETED
+                        <p className="text-xs text-white/60 mt-1 whitespace-pre-wrap">
+                          {row.body || "(no body)"}
+                        </p>
+
+                        <div className="mt-2 text-[11px] text-white/40 space-y-1">
+                          <div>
+                            Sent:{" "}
+                            <span className="text-white/60">
+                              {formatMaybeTimestamp(row.sentAt)}
+                            </span>
                           </div>
-                        )}
+                          <div>
+                            Edited:{" "}
+                            <span className="text-white/60">
+                              {formatMaybeTimestamp(row.editedAt)}
+                            </span>
+                          </div>
+                          <div>
+                            Resent:{" "}
+                            <span className="text-white/60">
+                              {formatMaybeTimestamp(row.resentAt)}
+                            </span>
+                          </div>
+                          <div>
+                            Deleted:{" "}
+                            <span className="text-white/60">
+                              {formatMaybeTimestamp(row.deletedAt)}
+                            </span>
+                          </div>
+                          {row.status === "deleted" && (
+                            <div className="text-rose-200/80">
+                              Status: DELETED
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
 
@@ -574,6 +883,18 @@ export default function AnnouncementsCard() {
                           >
                             Delete
                           </button>
+
+                          {/* ✅ Permanent delete only when already soft-deleted */}
+                          {row.status === "deleted" && (
+                            <button
+                              onClick={() =>
+                                permanentDeleteAnnouncement(row.id)
+                              }
+                              className="rounded-lg border border-rose-500/40 bg-rose-500/15 px-3 py-1.5 text-xs font-semibold hover:bg-rose-500/25 transition"
+                            >
+                              Permanent Delete
+                            </button>
+                          )}
                         </>
                       )}
                     </div>
